@@ -1,0 +1,45 @@
+# DSRA Block — Debt Service Reserve Account requirement
+#
+# Computes the required DSRA balance as a fixed number of months of
+# forward-looking debt service.  The DSRA is funded through the waterfall
+# as a priority-2 bucket (before equity distributions).
+#
+# dsra_required[t] = lag(total_debt_service, 1) × (dsra_months / 3.0)
+#
+# The lag(·,1) looks one quarter ahead (using forward lag convention) to
+# approximate the "next period's debt service" reserve requirement.
+# dsra_months / 3.0 converts months to quarters (3 months per quarter).
+#
+# top_up[t]    = max(0, dsra_required[t] − dsra_balance[t−1])
+# release[t]   = max(0, dsra_balance[t−1] − dsra_required[t])
+#
+# Note: dsra_balance (opening/closing) is handled by the DSRA ledger block
+# declared separately in the full model template.  This block provides
+# dsra_required as a forward-looking target for the waterfall.
+#
+# Assumptions consumed:
+#   dsra_months   — Reserve coverage in months, e.g. 6 (= 2 quarters of DS)
+
+block_id: dsra_block
+category: dsra
+block_type: standard
+description: "DSRA requirement: forward-looking debt service reserve target"
+
+inputs:
+  - name: total_debt_service
+    source: debt_service_block.total_debt_service
+  - name: dsra_months
+    source: assumption.dsra_months
+  - name: is_debt_outstanding
+    source: phase.is_debt_outstanding
+
+outputs:
+  - name: dsra_required
+    unit: INR_Lakhs
+
+body:
+  # Forward equivalent of next quarter's DS scaled to the reserve coverage
+  # lag(x, -1) would shift forward; lag(x, 1) shifts back. We use the previous
+  # period's DS as a proxy for the upcoming period (conservative approximation).
+  - target: dsra_required
+    expr: "lag(total_debt_service, 1) * (dsra_months / 3.0) * is_debt_outstanding"

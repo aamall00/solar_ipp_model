@@ -1,0 +1,57 @@
+# Debt Service Block — DSCR-sculpted debt service schedule
+#
+# This block is a PLACEHOLDER whose outputs are OVERWRITTEN by the
+# sculpting_solver declared in the model template's solve_loops section.
+#
+# The body initialises all outputs to zero so that:
+#   (a) downstream blocks (cashflow, tax, waterfall) have valid arrays before
+#       the sculpting loop fires, and
+#   (b) the sculpting loop can safely read cashflow_block.cfads.
+#
+# After the sculpting solve_loop converges, the executor writes:
+#   debt_service_block.principal_repayment
+#   debt_service_block.interest_payment
+#   debt_service_block.outstanding_debt_balance
+#   debt_service_block.total_debt_service
+#
+# The sculpting_solver targets DSCR = dscr_target using the PV-scaling algorithm.
+# Repayments are zero outside the operational debt period (COD → debt_maturity).
+#
+# Assumptions consumed (read by the executor's _run_sculpting, not by the block body):
+#   interest_rate       — Annual nominal rate for quarterly compounding, e.g. 0.0975
+#   moratorium_periods  — Moratorium after COD (integer quarters), typically 0
+#   dscr_target         — Target DSCR ratio, e.g. 1.20
+
+block_id: debt_service_block
+category: debt
+block_type: standard
+description: "DSCR-sculpted debt service (outputs overwritten by sculpting_solver)"
+
+inputs:
+  - name: cfads
+    source: cashflow_block.cfads
+  - name: debt_amount
+    source: debt_sizing_block.debt_amount
+  - name: interest_rate
+    source: assumption.interest_rate
+
+outputs:
+  - name: total_debt_service
+    unit: INR_Lakhs
+  - name: principal_repayment
+    unit: INR_Lakhs
+  - name: interest_payment
+    unit: INR_Lakhs
+  - name: outstanding_debt_balance
+    unit: INR_Lakhs
+
+body:
+  # Initialise to zero — sculpting_solver will overwrite these arrays
+  - target: total_debt_service
+    expr: "scalar_to_series(0.0)"
+  - target: principal_repayment
+    expr: "scalar_to_series(0.0)"
+  - target: interest_payment
+    expr: "scalar_to_series(0.0)"
+  - target: outstanding_debt_balance
+    expr: "scalar_to_series(0.0)"

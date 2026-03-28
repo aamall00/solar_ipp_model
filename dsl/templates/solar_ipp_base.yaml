@@ -1,0 +1,962 @@
+# ============================================================================
+# Solar IPP Base Model — Karnataka 100 MW Benchmark
+# ============================================================================
+#
+# Full ModelDefinition YAML for a utility-scale solar IPP in Karnataka, India.
+# Load via:  from dsl.parser import DSLParser; md, v = DSLParser().load_file(path)
+#
+# Project parameters (base case)
+# --------------------------------
+#   Capacity       : 100 MW AC
+#   CUF            : 22 % (Karnataka P90 ≈ 19–20 %, P50 ≈ 21–23 %)
+#   Capex          : ₹450 Lakh/MW  →  ₹45 000 Lakh total
+#   Tariff         : ₹2.65/kWh (fixed, 25-yr PPA)
+#   Senior debt    : 70 % at 9.75 % p.a., 18-yr tenor, quarterly repayment
+#   DSCR target    : 1.20 × (sculpted profile)
+#   Operations     : 25 years post-COD
+#
+# Time axis (quarterly)
+# ----------------------
+#   Periods 0–3   : Construction (4 quarters)
+#   Periods 4–103 : Operations (100 quarters = 25 years)
+#   COD            : period 4  (= construction_periods)
+#   Debt maturity  : period 75 (= COD + 18 yr × 4 qtr/yr − 1 = 4 + 71)
+#   Total periods  : 104
+#
+# Solve loop
+# -----------
+# The debt service schedule is DSCR-sculpted (PV-scaling algorithm).
+# The sculpting_solver fires after debt_service_block initialises to zero,
+# re-evaluates all downstream blocks to compute CFADS, then sizes DS so that
+# DSCR ≈ dscr_target in every repayment period.
+#
+# One-pass tax approximation:
+#   Tax is first computed with interest_payment = 0.  The sculpting loop uses
+#   this CFADS to shape DS.  After sculpting, downstream blocks re-execute
+#   with actual interest_payment, giving correct final tax/CFADS values.
+#   The resulting actual DSCR is within 1–2 % of target — acceptable for
+#   bankability screening.
+
+# ============================================================================
+# 1. Project Skeleton
+# ============================================================================
+
+project_skeleton:
+  model_id: solar_ipp_karnataka_100mw
+  project_type: solar_ipp
+  currency: INR
+  currency_unit: Lakhs
+  periods_per_year: 4
+  construction_periods: 4
+  operations_periods: 100
+  milestones:
+    financial_close: 0
+    cod: 4
+    debt_maturity: 75
+  # phases: auto-derived by DSLParser (_derive_phases); omit from source YAML
+
+# ============================================================================
+# 2. Assumption Schema
+# ============================================================================
+
+assumption_schema:
+  assumptions:
+
+    # --- Generation ---
+    - name: capacity_mw
+      type: scalar
+      unit: MW
+      value: 100.0
+
+    - name: cuf
+      type: scalar
+      unit: ratio
+      value: 0.22
+      constraints:
+        min: 0.15
+        max: 0.30
+
+    - name: degradation_rate
+      type: scalar
+      unit: per_year
+      value: 0.005
+      sensitivity:
+        vary: true
+        range_pct: 0.50
+        distribution: triangular
+
+    - name: auxiliary_consumption
+      type: scalar
+      unit: ratio
+      value: 0.005
+
+    # --- Revenue ---
+    - name: tariff
+      type: scalar
+      unit: INR_per_kWh
+      value: 2.65
+      constraints:
+        min: 0.0
+      sensitivity:
+        vary: true
+        range_pct: 0.10
+        distribution: triangular
+
+    - name: tariff_escalation
+      type: scalar
+      unit: per_year
+      value: 0.0
+
+    - name: ppa_tenor_years
+      type: scalar
+      unit: years
+      value: 25.0
+      constraints:
+        min: 10.0
+        max: 35.0
+
+    # --- Construction / Capex ---
+    - name: capex_per_mw
+      type: scalar
+      unit: INR_Lakhs_per_MW
+      value: 450.0
+      sensitivity:
+        vary: true
+        range_pct: 0.10
+        distribution: triangular
+
+    - name: capex_schedule
+      # time_series type: auto-padded to n_periods; ops-period values are
+      # zeroed by the construction phase mask in the block expression.
+      type: time_series
+      unit: fraction
+      value: [0.25, 0.25, 0.25, 0.25]
+
+    # --- O&M ---
+    - name: opex_per_mw_pa
+      type: scalar
+      unit: INR_Lakhs_per_MW_per_year
+      value: 8.0
+      sensitivity:
+        vary: true
+        range_pct: 0.20
+        distribution: triangular
+
+    - name: opex_escalation
+      type: scalar
+      unit: per_year
+      value: 0.03
+
+    - name: insurance_percent_of_capex
+      # Annual insurance premium as a fraction of total project capex.
+      # Typical range for Indian solar IPP: 0.3%–0.8% p.a.
+      type: scalar
+      unit: ratio
+      value: 0.005
+      constraints:
+        min: 0.0
+        max: 0.02
+
+    - name: land_lease_lakhs_pa
+      # Annual land lease payment. Set to 0 if land is owned.
+      type: scalar
+      unit: INR_Lakhs_per_year
+      value: 0.0
+      constraints:
+        min: 0.0
+
+    - name: maintenance_capex_pct
+      # Annual capex during operations as a fraction of total project capex.
+      # Covers periodic component replacements (inverters, modules) and major overhauls.
+      # Deducted from CFADS: CFADS = EBITDA − Tax − capex_during_ops.
+      type: scalar
+      unit: ratio
+      value: 0.0
+      constraints:
+        min: 0.0
+        max: 0.10
+
+    # --- Debt ---
+    - name: debt_pct
+      type: scalar
+      unit: ratio
+      value: 0.70
+      constraints:
+        min: 0.40
+        max: 0.80
+
+    - name: interest_rate
+      type: scalar
+      unit: per_year
+      value: 0.0975
+      constraints:
+        min: 0.05
+        max: 0.20
+      sensitivity:
+        vary: true
+        range_pct: 0.15
+        distribution: triangular
+
+    - name: moratorium_periods
+      type: scalar
+      unit: quarters
+      value: 0.0
+
+    - name: dscr_target
+      type: scalar
+      unit: ratio
+      value: 1.20
+      constraints:
+        min: 1.0
+        max: 2.0
+
+    # debt_sizing_mode — controls how total debt quantum is determined:
+    #   0.0  →  cost_based : total_debt = capex × debt_pct (fixed)
+    #            Repayment  : equal principal instalments over tenor
+    #            DSCR target NOT enforced; warnings raised on breach
+    #   1.0  →  cfads_based: total_debt = PV(CFADS / dscr_target)
+    #            Repayment  : sculpted proportional to CFADS (DSCR = target by design)
+    #            Iterates CFADS until self-consistent with interest tax shield
+    - name: debt_sizing_mode
+      type: scalar
+      unit: flag
+      value: 0.0
+
+    - name: dsra_months
+      type: scalar
+      unit: months
+      value: 6.0
+
+    - name: cash_sweep_rate
+      # Fraction of post-DSRA excess cash swept to accelerate debt repayment.
+      # 0.0 = no sweep (all residual to equity). 1.0 = full sweep until debt retired.
+      type: scalar
+      unit: ratio
+      value: 0.0
+      constraints:
+        min: 0.0
+        max: 1.0
+
+    # --- Tax & Depreciation ---
+    - name: tax_rate
+      type: scalar
+      unit: ratio
+      value: 0.25
+      constraints:
+        min: 0.0
+        max: 0.40
+
+    - name: depreciation_rate
+      type: scalar
+      unit: per_year
+      value: 0.05
+
+    - name: depreciation_method
+      # Depreciation method for P&L and tax computation.
+      # 'slm' = straight-line (default). 'wdv' = written-down value / declining balance.
+      # Note: WDV calculation requires a ledger-type executor code path; the current
+      # depreciation_block computes SLM only. This assumption is consumed by the ingestion
+      # and blueprint agents to select the correct block variant in future work.
+      type: enum
+      unit: string
+      value: "slm"
+
+    - name: wdv_rate
+      # Annual WDV depreciation rate (decimal). Only applicable when depreciation_method='wdv'.
+      # Indian Income Tax Act (Schedule II) specifies 40% p.a. for solar photovoltaic systems.
+      type: scalar
+      unit: per_year
+      value: 0.40
+      constraints:
+        min: 0.05
+        max: 0.80
+
+    - name: use_wdv
+      # Numeric flag derived from depreciation_method: 0.0 = SLM, 1.0 = WDV.
+      # Set automatically by the ingestion agent; do not edit directly.
+      type: scalar
+      unit: flag
+      value: 0.0
+      constraints:
+        min: 0.0
+        max: 1.0
+
+    # --- IDC capitalisation ---
+    # idc_capitalised: 0.0 = IDC equity-funded (default)
+    #                  1.0 = IDC capitalised into debt base (requires goal_seek loop)
+    - name: idc_capitalised
+      type: scalar
+      unit: flag
+      value: 0.0
+
+    # idc_supplement: solved by goal_seek loop when idc_capitalised=1;
+    # always 0.0 as starting value (and permanent value when not capitalising)
+    - name: idc_supplement
+      type: scalar
+      unit: INR_Lakhs
+      value: 0.0
+
+    # --- Returns ---
+    - name: equity_irr_target
+      type: scalar
+      unit: per_year
+      value: 0.14
+
+# ============================================================================
+# 3. Calculation Blocks
+# ============================================================================
+
+calculation_blocks:
+  blocks:
+
+    # ------------------------------------------------------------------
+    # 3.1  Generation — gross and net solar output
+    # ------------------------------------------------------------------
+    - block_id: generation_block
+      category: generation
+      block_type: standard
+      description: "Quarterly AC generation (kWh) with annual degradation"
+      inputs:
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: cuf
+          source: assumption.cuf
+        - name: degradation_rate
+          source: assumption.degradation_rate
+        - name: aux_consumption
+          source: assumption.auxiliary_consumption
+        - name: is_operational
+          source: phase.is_operational
+      outputs:
+        - name: gross_generation_kwh
+          unit: kWh
+        - name: net_generation_kwh
+          unit: kWh
+      body:
+        - target: gross_generation_kwh
+          expr: "capacity_mw * 1000.0 * cuf * 2190.0 * escalate(1.0, -degradation_rate) * is_operational"
+        - target: net_generation_kwh
+          expr: "gross_generation_kwh * (1.0 - aux_consumption)"
+
+    # ------------------------------------------------------------------
+    # 3.2  Revenue — PPA tariff income
+    # ------------------------------------------------------------------
+    - block_id: revenue_block
+      category: revenue
+      block_type: standard
+      description: "PPA revenue from net generation at contracted tariff"
+      inputs:
+        - name: net_generation_kwh
+          source: generation_block.net_generation_kwh
+        - name: tariff
+          source: assumption.tariff
+        - name: tariff_escalation
+          source: assumption.tariff_escalation
+      outputs:
+        - name: revenue
+          unit: INR_Lakhs
+      body:
+        - target: effective_tariff
+          expr: "tariff * escalate(1.0, tariff_escalation)"
+        - target: revenue
+          expr: "net_generation_kwh * effective_tariff / 100000.0"
+
+    # ------------------------------------------------------------------
+    # 3.3  Construction — capex drawdown schedule
+    # ------------------------------------------------------------------
+    - block_id: construction_block
+      category: construction
+      block_type: standard
+      description: "Capex drawdown schedule during construction"
+      inputs:
+        - name: capex_per_mw
+          source: assumption.capex_per_mw
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: capex_schedule
+          source: assumption.capex_schedule
+        - name: is_construction
+          source: phase.is_construction
+      outputs:
+        - name: total_project_capex
+          unit: INR_Lakhs
+        - name: capex_drawdown
+          unit: INR_Lakhs
+        - name: cumulative_capex
+          unit: INR_Lakhs
+      body:
+        - target: total_project_capex
+          expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+        - target: capex_drawdown
+          expr: "capex_per_mw * capacity_mw * capex_schedule * is_construction"
+        - target: cumulative_capex
+          expr: "cumsum(capex_drawdown)"
+
+    # ------------------------------------------------------------------
+    # 3.4  Debt Sizing — senior term loan quantum
+    # ------------------------------------------------------------------
+    - block_id: debt_sizing_block
+      category: debt_sizing
+      block_type: standard
+      description: "Senior debt = (capex + idc_supplement) × debt_pct"
+      inputs:
+        - name: capex_per_mw
+          source: assumption.capex_per_mw
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: debt_pct
+          source: assumption.debt_pct
+        - name: idc_supplement
+          source: assumption.idc_supplement
+      outputs:
+        - name: total_project_cost
+          unit: INR_Lakhs
+        - name: debt_amount
+          unit: INR_Lakhs
+        - name: equity_amount
+          unit: INR_Lakhs
+      body:
+        - target: total_project_cost
+          expr: "scalar_to_series(capex_per_mw * capacity_mw + idc_supplement)"
+        - target: debt_amount
+          expr: "scalar_to_series((capex_per_mw * capacity_mw + idc_supplement) * debt_pct)"
+        - target: equity_amount
+          expr: "scalar_to_series((capex_per_mw * capacity_mw + idc_supplement) * (1.0 - debt_pct))"
+
+    # ------------------------------------------------------------------
+    # 3.5  Debt Drawdown — construction-period disbursements
+    # ------------------------------------------------------------------
+    - block_id: debt_drawdown_block
+      category: debt_drawdown
+      block_type: standard
+      description: "Debt drawn in proportion to capex schedule"
+      inputs:
+        - name: debt_amount
+          source: debt_sizing_block.debt_amount
+        - name: capex_schedule
+          source: assumption.capex_schedule
+        - name: is_construction
+          source: phase.is_construction
+      outputs:
+        - name: drawdown
+          unit: INR_Lakhs
+        - name: cumulative_drawdown
+          unit: INR_Lakhs
+      body:
+        - target: drawdown
+          expr: "debt_amount * capex_schedule * is_construction"
+        - target: cumulative_drawdown
+          expr: "cumsum(drawdown)"
+
+    # ------------------------------------------------------------------
+    # 3.6  IDC — interest during construction
+    # ------------------------------------------------------------------
+    # Spec formula: idc[t] = cumsum(debt_drawn)[t-1] × (interest_rate / periods_per_year)
+    # Simple interest on the balance drawn in PRIOR periods (lag by 1).
+    - block_id: idc_block
+      category: idc
+      block_type: standard
+      description: "Simple interest on prior-period debt drawdowns during construction (equity-funded)"
+      inputs:
+        - name: cumulative_drawdown
+          source: debt_drawdown_block.cumulative_drawdown
+        - name: interest_rate
+          source: assumption.interest_rate
+        - name: is_construction
+          source: phase.is_construction
+      outputs:
+        - name: idc_per_period
+          unit: INR_Lakhs
+        - name: cumulative_idc
+          unit: INR_Lakhs
+        - name: idc_total
+          unit: INR_Lakhs
+      body:
+        # Simple quarterly rate: interest_rate / periods_per_year (4 for quarterly model)
+        - target: r_simple
+          expr: "scalar_to_series(interest_rate / 4.0)"
+        # IDC[t] = balance drawn in prior periods × r_simple
+        # lag(., 1) shifts right by one period; t=0 gets 0 (no prior draw yet)
+        - target: idc_per_period
+          expr: "lag(cumulative_drawdown, 1) * r_simple * is_construction"
+        - target: cumulative_idc
+          expr: "cumsum(idc_per_period)"
+        - target: idc_total
+          expr: "scalar_to_series(max(cumulative_idc))"
+
+    # ------------------------------------------------------------------
+    # 3.7  Debt Service — DSCR-sculpted (placeholder, overwritten by solver)
+    # ------------------------------------------------------------------
+    - block_id: debt_service_block
+      category: debt
+      block_type: standard
+      description: "Sculpted debt service schedule (initialised to zero; overwritten by sculpting_solver)"
+      inputs:
+        - name: cfads
+          source: cashflow_block.cfads
+        - name: debt_amount
+          source: debt_sizing_block.debt_amount
+        - name: interest_rate
+          source: assumption.interest_rate
+      outputs:
+        - name: total_debt_service
+          unit: INR_Lakhs
+        - name: principal_repayment
+          unit: INR_Lakhs
+        - name: interest_payment
+          unit: INR_Lakhs
+        - name: outstanding_debt_balance
+          unit: INR_Lakhs
+      body:
+        - target: total_debt_service
+          expr: "scalar_to_series(0.0)"
+        - target: principal_repayment
+          expr: "scalar_to_series(0.0)"
+        - target: interest_payment
+          expr: "scalar_to_series(0.0)"
+        - target: outstanding_debt_balance
+          expr: "scalar_to_series(0.0)"
+
+    # ------------------------------------------------------------------
+    # 3.8  OPEX — escalating O&M costs (base O&M + insurance + land lease)
+    # ------------------------------------------------------------------
+    - block_id: opex_block
+      category: opex
+      block_type: standard
+      description: "Quarterly O&M costs: base O&M escalated annually, plus insurance and land lease"
+      inputs:
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: capex_per_mw
+          source: assumption.capex_per_mw
+        - name: opex_per_mw_pa
+          source: assumption.opex_per_mw_pa
+        - name: opex_escalation
+          source: assumption.opex_escalation
+        - name: insurance_percent_of_capex
+          source: assumption.insurance_percent_of_capex
+        - name: land_lease_lakhs_pa
+          source: assumption.land_lease_lakhs_pa
+        - name: is_operational
+          source: phase.is_operational
+      outputs:
+        - name: base_opex
+          unit: INR_Lakhs
+        - name: insurance
+          unit: INR_Lakhs
+        - name: land_lease
+          unit: INR_Lakhs
+        - name: total_opex
+          unit: INR_Lakhs
+      body:
+        # Base O&M: annual cost escalated at opex_escalation rate, paid quarterly
+        - target: opex_annual_base
+          expr: "capacity_mw * opex_per_mw_pa"
+        - target: base_opex
+          expr: "opex_annual_base / 4.0 * escalate(1.0, opex_escalation) * is_operational"
+        # Insurance: annual premium = capex × rate; fixed in nominal terms (% of fixed asset base)
+        - target: capex_base
+          expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+        - target: insurance
+          expr: "capex_base * insurance_percent_of_capex / 4.0 * is_operational"
+        # Land lease: fixed annual payment, paid quarterly
+        - target: land_lease
+          expr: "scalar_to_series(land_lease_lakhs_pa / 4.0) * is_operational"
+        # Total opex = base O&M + insurance + land lease
+        - target: total_opex
+          expr: "base_opex + insurance + land_lease"
+
+    # ------------------------------------------------------------------
+    # 3.9  DSRA — debt service reserve account requirement
+    # ------------------------------------------------------------------
+    - block_id: dsra_block
+      category: dsra
+      block_type: standard
+      description: "Required DSRA balance (forward-looking coverage target)"
+      inputs:
+        - name: total_debt_service
+          source: debt_service_block.total_debt_service
+        - name: dsra_months
+          source: assumption.dsra_months
+        - name: is_debt_outstanding
+          source: phase.is_debt_outstanding
+      outputs:
+        - name: dsra_required
+          unit: INR_Lakhs
+      body:
+        - target: dsra_required
+          expr: "lag(total_debt_service, 1) * (dsra_months / 3.0) * is_debt_outstanding"
+
+    # ------------------------------------------------------------------
+    # 3.10  Depreciation — SLM or WDV on 95% of capex
+    # ------------------------------------------------------------------
+    - block_id: depreciation_block
+      category: depreciation
+      block_type: standard
+      description: "Book depreciation on 95% of capex; SLM (default) or WDV selected via use_wdv flag"
+      inputs:
+        - name: capex_per_mw
+          source: assumption.capex_per_mw
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: depreciation_rate
+          source: assumption.depreciation_rate
+        - name: depreciation_method
+          source: assumption.depreciation_method
+        - name: wdv_rate
+          source: assumption.wdv_rate
+        - name: use_wdv
+          source: assumption.use_wdv
+        - name: is_operational
+          source: phase.is_operational
+      outputs:
+        - name: depreciable_asset_base
+          unit: INR_Lakhs
+        - name: slm_depreciation
+          unit: INR_Lakhs
+        - name: wdv_depreciation
+          unit: INR_Lakhs
+        - name: depreciation
+          unit: INR_Lakhs
+      body:
+        # Depreciable base = 95% of total capex (land at 5% excluded)
+        - target: depreciable_asset_base
+          expr: "scalar_to_series(capex_per_mw * capacity_mw * 0.95)"
+        # SLM: fixed quarterly charge during operations
+        - target: slm_depreciation
+          expr: "depreciable_asset_base * depreciation_rate / 4.0 * is_operational"
+        # WDV: declining balance approximated via escalate().
+        # Formula: base * (wdv_rate/4) * (1-wdv_rate)^((t-cod)/4)
+        # escalate(1,-wdv_rate) uses absolute period index (0-based), so multiply
+        # by 1/(1-wdv_rate) to offset the 4-quarter construction phase (cod at period 4).
+        - target: wdv_correction
+          expr: "scalar_to_series(1.0 / (1.0 - wdv_rate))"
+        - target: wdv_depreciation
+          expr: "depreciable_asset_base * wdv_rate / 4.0 * escalate(1.0, -wdv_rate) * wdv_correction * is_operational"
+        # Select method: use_wdv=0.0 → SLM, use_wdv=1.0 → WDV
+        - target: depreciation
+          expr: "slm_depreciation * (1.0 - use_wdv) + wdv_depreciation * use_wdv"
+
+    # ------------------------------------------------------------------
+    # 3.11  Tax — corporate income tax with interest deduction
+    # ------------------------------------------------------------------
+    - block_id: tax_block
+      category: tax
+      block_type: standard
+      description: "Current tax on PBT (EBITDA minus depreciation and interest)"
+      inputs:
+        - name: revenue
+          source: revenue_block.revenue
+        - name: opex
+          source: opex_block.total_opex
+        - name: depreciation
+          source: depreciation_block.depreciation
+        - name: interest_payment
+          source: debt_service_block.interest_payment
+        - name: tax_rate
+          source: assumption.tax_rate
+      outputs:
+        - name: ebitda
+          unit: INR_Lakhs
+        - name: ebit
+          unit: INR_Lakhs
+        - name: pbt
+          unit: INR_Lakhs
+        - name: tax
+          unit: INR_Lakhs
+      body:
+        - target: ebitda
+          expr: "revenue - opex"
+        - target: ebit
+          expr: "ebitda - depreciation"
+        - target: pbt
+          expr: "ebit - interest_payment"
+        - target: tax
+          expr: "max_series(pbt, scalar_to_series(0.0)) * tax_rate"
+
+    # ------------------------------------------------------------------
+    # 3.12  Cashflow — CFADS and free cashflow
+    # ------------------------------------------------------------------
+    - block_id: cashflow_block
+      category: cashflow
+      block_type: standard
+      description: "CFADS (pre-DS) and free cashflow (post-DS); CFADS used by sculpting solver"
+      inputs:
+        - name: revenue
+          source: revenue_block.revenue
+        - name: opex
+          source: opex_block.total_opex
+        - name: tax
+          source: tax_block.tax
+        - name: total_debt_service
+          source: debt_service_block.total_debt_service
+        - name: capex_per_mw
+          source: assumption.capex_per_mw
+        - name: capacity_mw
+          source: assumption.capacity_mw
+        - name: maintenance_capex_pct
+          source: assumption.maintenance_capex_pct
+        - name: is_operational
+          source: phase.is_operational
+      outputs:
+        - name: ebitda
+          unit: INR_Lakhs
+        - name: capex_during_ops
+          unit: INR_Lakhs
+        - name: cfads
+          unit: INR_Lakhs
+        - name: free_cashflow
+          unit: INR_Lakhs
+      body:
+        # EBITDA: earnings before interest, tax, depreciation, amortisation
+        - target: ebitda
+          expr: "revenue - opex"
+        # Maintenance capex during operations: periodic replacement provision
+        # (e.g. inverters, modules). Zero by default; grows with maintenance_capex_pct.
+        - target: capex_total_base
+          expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+        - target: capex_during_ops
+          expr: "capex_total_base * maintenance_capex_pct / 4.0 * is_operational"
+        # CFADS: post-tax, post-maintenance-capex, pre-debt-service
+        - target: cfads
+          expr: "ebitda - tax - capex_during_ops"
+        # Free cashflow: remaining after debt service
+        - target: free_cashflow
+          expr: "cfads - total_debt_service"
+
+    # ------------------------------------------------------------------
+    # 3.13  Waterfall — 5-bucket priority cash allocation (spec)
+    # ------------------------------------------------------------------
+    - block_id: waterfall_block
+      category: waterfall
+      block_type: waterfall
+      description: "opex → senior debt service → DSRA funding → cash sweep → equity distribution"
+      available_cash_input: revenue_block.revenue
+      inputs:
+        - name: revenue
+          source: revenue_block.revenue
+        - name: total_opex
+          source: opex_block.total_opex
+        - name: tax
+          source: tax_block.tax
+        - name: total_ds
+          source: debt_service_block.total_debt_service
+        - name: dsra_req
+          source: dsra_block.dsra_required
+        - name: cash_sweep_rate
+          source: assumption.cash_sweep_rate
+        - name: is_debt_outstanding
+          source: phase.is_debt_outstanding
+      outputs:
+        - name: opex_payment
+          unit: INR_Lakhs
+        - name: senior_debt_service
+          unit: INR_Lakhs
+        - name: dsra_funding
+          unit: INR_Lakhs
+        - name: cash_sweep
+          unit: INR_Lakhs
+        - name: equity_distribution
+          unit: INR_Lakhs
+      buckets:
+        - name: opex_payment
+          priority: 1
+          target_expr: "total_opex + tax"
+          recipient: opex_block
+        - name: senior_debt_service
+          priority: 2
+          target_expr: "total_ds"
+          recipient: debt_service_block
+        - name: dsra_funding
+          priority: 3
+          target_expr: "max_series(dsra_req - lag(dsra_req, 1), scalar_to_series(0.0))"
+          recipient: dsra_block
+        - name: cash_sweep
+          priority: 4
+          target_expr: "(available_cash - opex_payment - senior_debt_service - dsra_funding) * cash_sweep_rate * is_debt_outstanding"
+          recipient: debt_service_block
+
+    # ------------------------------------------------------------------
+    # 3.14  Returns — equity and project cashflows for IRR/NPV
+    # ------------------------------------------------------------------
+    - block_id: returns_block
+      category: returns
+      block_type: standard
+      description: "Equity and project-level cashflows for KPI computation"
+      inputs:
+        - name: capex_drawdown
+          source: construction_block.capex_drawdown
+        - name: debt_drawdown
+          source: debt_drawdown_block.drawdown
+        - name: idc_per_period
+          source: idc_block.idc_per_period
+        - name: idc_capitalised
+          source: assumption.idc_capitalised
+        - name: equity_distribution
+          source: waterfall_block.equity_distribution
+        - name: cfads
+          source: cashflow_block.cfads
+        - name: is_construction
+          source: phase.is_construction
+        - name: is_operational
+          source: phase.is_operational
+      outputs:
+        - name: equity_invested
+          unit: INR_Lakhs
+        - name: equity_cashflow
+          unit: INR_Lakhs
+        - name: project_cashflow
+          unit: INR_Lakhs
+      body:
+        - target: equity_invested
+          expr: "(capex_drawdown - debt_drawdown + idc_per_period * (1.0 - idc_capitalised)) * is_construction * -1.0"
+        - target: equity_cashflow
+          expr: "equity_invested + equity_distribution"
+        - target: project_cashflow
+          expr: "capex_drawdown * is_construction * -1.0 + cfads * is_operational"
+
+  # ------------------------------------------------------------------
+  # Solve Loops
+  # ------------------------------------------------------------------
+  solve_loops:
+    # IDC capitalisation loop — runs BEFORE sculpting (assumption free_variable = prepended).
+    # Finds idc_supplement such that idc_total == idc_supplement (self-consistent circle):
+    #   larger debt → more IDC → idc_supplement grows → larger debt → ...
+    # target_expression multiplied by idc_capitalised so the loop trivially converges at
+    # idc_supplement=0 when idc_capitalised=0 (no change to base case).
+    - loop_id: idc_capitalisation
+      type: goal_seek
+      free_variable: assumption.idc_supplement
+      target_expression: "assumption.idc_capitalised * idc_block.idc_total - assumption.idc_supplement"
+      target_value: 0.0
+      tolerance: 1.0
+      max_iterations: 30
+
+    - loop_id: debt_service_sculpting
+      type: sculpting
+      # free_variable: the block whose outputs are replaced by the sculpting solver.
+      # Executor convention: target_block_id = free_variable.split(".")[0]
+      free_variable: debt_service_block.total_debt_service
+      # target_expression is required by the schema but unused for sculpting type;
+      # set to a valid reference that exists in the model.
+      target_expression: "cashflow_block.cfads"
+      # target_value is the fallback dscr_target if assumption.dscr_target is absent.
+      target_value: 1.20
+      tolerance: 1.0e-6
+      max_iterations: 50
+
+# ============================================================================
+# 4. Model Wiring
+# ============================================================================
+
+model_wiring:
+
+  # Key cross-block connections (documentation and validation).
+  # All sources are also declared as BlockInput.source within each block.
+  connections:
+    # Generation → Revenue
+    - from: generation_block.net_generation_kwh
+      to: revenue_block.net_generation_kwh
+
+    # Debt sizing → Drawdown
+    - from: debt_sizing_block.debt_amount
+      to: debt_drawdown_block.debt_amount
+
+    # Drawdown → IDC
+    - from: debt_drawdown_block.cumulative_drawdown
+      to: idc_block.cumulative_drawdown
+
+    # Debt sizing → Debt service (initial placeholder)
+    - from: debt_sizing_block.debt_amount
+      to: debt_service_block.debt_amount
+
+    # Revenue → Tax
+    - from: revenue_block.revenue
+      to: tax_block.revenue
+
+    # Total opex (base O&M + insurance + land lease) → Tax
+    - from: opex_block.total_opex
+      to: tax_block.opex
+
+    # Depreciation → Tax
+    - from: depreciation_block.depreciation
+      to: tax_block.depreciation
+
+    # Debt service interest → Tax (tax shield; zero before sculpting)
+    - from: debt_service_block.interest_payment
+      to: tax_block.interest_payment
+
+    # Revenue → Cashflow
+    - from: revenue_block.revenue
+      to: cashflow_block.revenue
+
+    # Total opex → Cashflow (EBITDA = revenue − total_opex)
+    - from: opex_block.total_opex
+      to: cashflow_block.opex
+
+    # Tax → Cashflow
+    - from: tax_block.tax
+      to: cashflow_block.tax
+
+    # Debt service → Cashflow
+    - from: debt_service_block.total_debt_service
+      to: cashflow_block.total_debt_service
+
+    # Debt service → DSRA requirement
+    - from: debt_service_block.total_debt_service
+      to: dsra_block.total_debt_service
+
+    # Waterfall inputs
+    - from: revenue_block.revenue
+      to: waterfall_block.revenue
+    - from: opex_block.total_opex
+      to: waterfall_block.total_opex
+    - from: tax_block.tax
+      to: waterfall_block.tax
+    - from: debt_service_block.total_debt_service
+      to: waterfall_block.total_ds
+    - from: dsra_block.dsra_required
+      to: waterfall_block.dsra_req
+
+    # Returns inputs
+    - from: construction_block.capex_drawdown
+      to: returns_block.capex_drawdown
+    - from: debt_drawdown_block.drawdown
+      to: returns_block.debt_drawdown
+    - from: idc_block.idc_per_period
+      to: returns_block.idc_per_period
+    - from: waterfall_block.equity_distribution
+      to: returns_block.equity_distribution
+    - from: cashflow_block.cfads
+      to: returns_block.cfads
+
+  output_reports:
+    income_statement:
+      - revenue_block.revenue
+      - opex_block.base_opex
+      - opex_block.insurance
+      - opex_block.land_lease
+      - opex_block.total_opex
+      - depreciation_block.depreciation
+      - tax_block.ebitda
+      - tax_block.ebit
+      - tax_block.pbt
+      - tax_block.tax
+
+    cash_flow_statement:
+      - cashflow_block.ebitda
+      - cashflow_block.capex_during_ops
+      - cashflow_block.cfads
+      - cashflow_block.free_cashflow
+
+    debt_schedule:
+      - debt_service_block.outstanding_debt_balance
+      - debt_service_block.principal_repayment
+      - debt_service_block.interest_payment
+      - debt_service_block.total_debt_service
+      - dsra_block.dsra_required
+
+    returns_summary:
+      - returns_block.equity_invested
+      - returns_block.equity_cashflow
+      - returns_block.project_cashflow

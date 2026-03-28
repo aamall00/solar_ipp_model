@@ -1,0 +1,61 @@
+# IDC Block — Interest During Construction
+#
+# Spec formula (simple interest on outstanding balance):
+#   idc[t] = cumsum(debt_drawn)[t-1] × (interest_rate / periods_per_year)
+#
+# Key implementation decisions
+# ------------------------------
+# 1. RATE  — simple division: interest_rate / 4.0 (quarterly model).
+#    The previous implementation used the compound equivalent
+#    (1 + rate)^0.25 − 1, which overstates IDC by ~6 bps per period at 9.75%.
+#    Project finance term-sheets quote annual nominal (simple) rates for IDC.
+#
+# 2. TIMING — lag(cumulative_drawdown, 1) gives the balance outstanding at the
+#    START of the current period (i.e. drawn in prior periods only).
+#    The previous implementation used unlagged cumulative_drawdown, which
+#    included the current-period draw and therefore charged interest one period
+#    too early.  At lag(., 1), period 0 correctly carries zero IDC.
+#
+# Assumptions consumed:
+#   interest_rate   — Annual nominal interest rate, e.g. 0.0975
+
+block_id: idc_block
+category: idc
+block_type: standard
+description: "Interest During Construction on debt drawdowns, funded by equity"
+
+inputs:
+  - name: cumulative_drawdown
+    source: debt_drawdown_block.cumulative_drawdown
+  - name: interest_rate
+    source: assumption.interest_rate
+  - name: is_construction
+    source: phase.is_construction
+
+outputs:
+  - name: idc_per_period
+    unit: INR_Lakhs
+  - name: cumulative_idc
+    unit: INR_Lakhs
+  - name: idc_total
+    unit: INR_Lakhs
+
+body:
+  # Simple quarterly rate: interest_rate / periods_per_year (= / 4 for quarterly model)
+  - target: r_simple
+    expr: "scalar_to_series(interest_rate / 4.0)"
+
+  # IDC[t] = balance drawn in PRIOR periods × r_simple × is_construction[t]
+  # lag(cumulative_drawdown, 1) shifts the series right by one period (fills t=0 with 0),
+  # giving the outstanding balance at the START of period t.
+  - target: idc_per_period
+    expr: "lag(cumulative_drawdown, 1) * r_simple * is_construction"
+
+  # Running total IDC (informational; used in returns block for equity cost)
+  - target: cumulative_idc
+    expr: "cumsum(idc_per_period)"
+
+  # Scalar total IDC broadcast to full series — used by IDC goal_seek loop
+  # when idc_capitalised=1: goal_seek finds idc_supplement s.t. idc_total = idc_supplement
+  - target: idc_total
+    expr: "scalar_to_series(max(cumulative_idc))"

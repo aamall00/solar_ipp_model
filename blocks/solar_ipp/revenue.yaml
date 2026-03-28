@@ -1,0 +1,37 @@
+# Revenue Block — PPA tariff revenue
+#
+# Converts net generation (kWh) to revenue (INR Lakhs) using the contracted
+# PPA tariff.  An optional tariff_escalation rate applies a compound step-up
+# each year (set to 0.0 for fixed-tariff Karnataka PPAs).
+#
+# Revenue (INR Lakhs) = net_generation_kwh × tariff (INR/kWh) / 100 000
+#
+# Assumptions consumed:
+#   tariff             — PPA tariff in INR/kWh, e.g. 2.65
+#   tariff_escalation  — Annual escalation rate, e.g. 0.0
+
+block_id: revenue_block
+category: revenue
+block_type: standard
+description: "PPA revenue from net solar generation at contracted tariff"
+
+inputs:
+  - name: net_generation_kwh
+    source: generation_block.net_generation_kwh
+  - name: tariff
+    source: assumption.tariff
+  - name: tariff_escalation
+    source: assumption.tariff_escalation
+
+outputs:
+  - name: revenue
+    unit: INR_Lakhs
+
+body:
+  # Effective tariff with optional annual step-up
+  - target: effective_tariff
+    expr: "tariff * escalate(1.0, tariff_escalation)"
+
+  # Revenue in INR Lakhs (1 Lakh = 100 000 INR)
+  - target: revenue
+    expr: "net_generation_kwh * effective_tariff / 100000.0"

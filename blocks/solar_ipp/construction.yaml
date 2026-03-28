@@ -1,0 +1,48 @@
+# Construction Block — Capex drawdown schedule
+#
+# Distributes total project capex across construction periods according to
+# a user-supplied schedule (list that sums to 1.0 over construction quarters).
+# Operations-period values are zeroed by multiplying by phase.is_construction.
+#
+# total_project_capex (INR Lakhs) = capex_per_mw × capacity_mw
+#
+# Assumptions consumed:
+#   capex_per_mw    — Specific capex in INR Lakhs/MW, e.g. 450.0
+#   capacity_mw     — Installed capacity in MW, e.g. 100.0
+#   capex_schedule  — List of quarterly fractions summing to 1.0, length ≥ construction_periods
+
+block_id: construction_block
+category: construction
+block_type: standard
+description: "Capex drawdown schedule during construction period"
+
+inputs:
+  - name: capex_per_mw
+    source: assumption.capex_per_mw
+  - name: capacity_mw
+    source: assumption.capacity_mw
+  - name: capex_schedule
+    source: assumption.capex_schedule
+  - name: is_construction
+    source: phase.is_construction
+
+outputs:
+  - name: total_project_capex
+    unit: INR_Lakhs
+  - name: capex_drawdown
+    unit: INR_Lakhs
+  - name: cumulative_capex
+    unit: INR_Lakhs
+
+body:
+  # Total project capex (scalar, broadcast to all periods)
+  - target: total_project_capex
+    expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+
+  # Quarterly capex drawdown — schedule fraction × total capex, masked to construction
+  - target: capex_drawdown
+    expr: "capex_per_mw * capacity_mw * capex_schedule * is_construction"
+
+  # Running cumulative capex (useful for IDC and DSRA sizing)
+  - target: cumulative_capex
+    expr: "cumsum(capex_drawdown)"

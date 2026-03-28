@@ -1,0 +1,44 @@
+# Generation Block — Solar energy generation with annual degradation
+#
+# Calculates quarterly AC generation from DC capacity, CUF, and degradation.
+# Hours per quarter = 8760 / 4 = 2190.
+# Generation is zero during construction (masked by phase.is_operational).
+#
+# Assumptions consumed:
+#   capacity_mw        — Installed AC capacity in MW
+#   cuf                — CUF (capacity utilisation factor), e.g. 0.22
+#   degradation_rate   — Annual degradation rate, e.g. 0.005 (= 0.5 % p.a.)
+#   auxiliary_consumption — Station auxiliary consumption ratio, e.g. 0.005
+
+block_id: generation_block
+category: generation
+block_type: standard
+description: "Quarterly AC generation (kWh) with annual degradation and auxiliary consumption"
+
+inputs:
+  - name: capacity_mw
+    source: assumption.capacity_mw
+  - name: cuf
+    source: assumption.cuf
+  - name: degradation_rate
+    source: assumption.degradation_rate
+  - name: aux_consumption
+    source: assumption.auxiliary_consumption
+  - name: is_operational
+    source: phase.is_operational
+
+outputs:
+  - name: gross_generation_kwh
+    unit: kWh
+  - name: net_generation_kwh
+    unit: kWh
+
+body:
+  # Gross generation before auxiliary loss, with annual degradation applied.
+  # escalate(1.0, -degradation_rate) = (1 - degradation_rate) ^ (period_index / 4)
+  - target: gross_generation_kwh
+    expr: "capacity_mw * 1000.0 * cuf * 2190.0 * escalate(1.0, -degradation_rate) * is_operational"
+
+  # Net generation after station auxiliary consumption
+  - target: net_generation_kwh
+    expr: "gross_generation_kwh * (1.0 - aux_consumption)"

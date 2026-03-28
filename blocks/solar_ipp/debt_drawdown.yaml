@@ -1,0 +1,41 @@
+# Debt Drawdown Block — Construction-period debt disbursements
+#
+# Debt is drawn in proportion to the capex schedule during construction.
+# The drawdown fraction per period mirrors the capex_schedule assumption.
+#
+# drawdown[t]            = debt_amount × capex_schedule[t] × is_construction[t]
+# cumulative_drawdown[t] = Σ drawdown[0..t]
+#
+# The cumulative_drawdown at COD equals debt_amount (fully drawn by first
+# operational period), which is the starting balance for the debt schedule.
+#
+# Assumptions consumed:
+#   capex_schedule  — Quarterly fractions summing to 1.0 over construction
+
+block_id: debt_drawdown_block
+category: debt_drawdown
+block_type: standard
+description: "Senior debt drawdown during construction proportional to capex schedule"
+
+inputs:
+  - name: debt_amount
+    source: debt_sizing_block.debt_amount
+  - name: capex_schedule
+    source: assumption.capex_schedule
+  - name: is_construction
+    source: phase.is_construction
+
+outputs:
+  - name: drawdown
+    unit: INR_Lakhs
+  - name: cumulative_drawdown
+    unit: INR_Lakhs
+
+body:
+  # Quarterly drawdown: fraction of total debt × construction mask
+  - target: drawdown
+    expr: "debt_amount * capex_schedule * is_construction"
+
+  # Cumulative drawn — at COD this equals debt_amount
+  - target: cumulative_drawdown
+    expr: "cumsum(drawdown)"

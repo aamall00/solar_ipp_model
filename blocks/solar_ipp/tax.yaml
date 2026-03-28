@@ -1,0 +1,55 @@
+# Tax Block — Corporate income tax
+#
+# Taxable income (PBT) = EBITDA − depreciation − interest_payment
+# Current tax = max(0, PBT) × tax_rate
+#
+# Interest deduction: uses actual quarterly interest from the sculpted
+# debt service schedule, providing a more accurate tax shield.
+#
+# Negative PBT is floored at zero (no tax refund); carried-forward losses
+# are NOT modelled here (a simplification appropriate for bankability screening).
+#
+# Assumptions consumed:
+#   tax_rate  — Effective corporate tax rate, e.g. 0.25 (25 %)
+
+block_id: tax_block
+category: tax
+block_type: standard
+description: "Corporate income tax on EBITDA minus depreciation and interest"
+
+inputs:
+  - name: revenue
+    source: revenue_block.revenue
+  - name: opex
+    source: opex_block.total_opex
+  - name: depreciation
+    source: depreciation_block.depreciation
+  - name: interest_payment
+    source: debt_service_block.interest_payment
+  - name: tax_rate
+    source: assumption.tax_rate
+
+outputs:
+  - name: ebitda
+    unit: INR_Lakhs
+  - name: ebit
+    unit: INR_Lakhs
+  - name: pbt
+    unit: INR_Lakhs
+  - name: tax
+    unit: INR_Lakhs
+
+body:
+  - target: ebitda
+    expr: "revenue - opex"
+
+  - target: ebit
+    expr: "ebitda - depreciation"
+
+  # Profit before tax: EBIT minus interest charge from debt service schedule
+  - target: pbt
+    expr: "ebit - interest_payment"
+
+  # Tax: applied only on positive PBT (no refund, no carry-forward)
+  - target: tax
+    expr: "max_series(pbt, scalar_to_series(0.0)) * tax_rate"

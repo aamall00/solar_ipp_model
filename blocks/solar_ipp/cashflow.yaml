@@ -1,0 +1,75 @@
+# Cashflow Block — CFADS and free cashflow
+#
+# CFADS (Cash Flow Available for Debt Service):
+#   CFADS = EBITDA − Tax − capex_during_ops
+#   = Revenue − OPEX − Tax − capex_during_ops
+#
+# capex_during_ops: quarterly maintenance capital expenditure during operations.
+#   = total_capex × maintenance_capex_pct / 4, active only during operations.
+#   Covers periodic component replacement (inverters, modules, switchgear).
+#   Default maintenance_capex_pct = 0.0 so legacy runs are unaffected.
+#
+# Note: CFADS is defined BEFORE debt service so the sculpting solver can use it
+# to size the debt service schedule.  Tax is computed on PBT (EBIT − interest);
+# initially, interest = 0 (debt_service_block initialises to zero), so CFADS
+# is slightly overstated before sculpting.  This one-pass approximation is
+# standard practice for bankability screening models.
+#
+# Free Cashflow:
+#   free_cashflow = CFADS − total_debt_service
+#
+# The executor's KPI layer looks for "cashflow_block.cfads" by convention.
+# The executor's sculpting solver looks for "cashflow_block.cfads" by convention.
+
+block_id: cashflow_block
+category: cashflow
+block_type: standard
+description: "CFADS (pre-DS) and free cashflow (post-DS); CFADS used by sculpting solver"
+
+inputs:
+  - name: revenue
+    source: revenue_block.revenue
+  - name: opex
+    source: opex_block.total_opex
+  - name: tax
+    source: tax_block.tax
+  - name: total_debt_service
+    source: debt_service_block.total_debt_service
+  - name: capex_per_mw
+    source: assumption.capex_per_mw
+  - name: capacity_mw
+    source: assumption.capacity_mw
+  - name: maintenance_capex_pct
+    source: assumption.maintenance_capex_pct
+  - name: is_operational
+    source: phase.is_operational
+
+outputs:
+  - name: ebitda
+    unit: INR_Lakhs
+  - name: capex_during_ops
+    unit: INR_Lakhs
+  - name: cfads
+    unit: INR_Lakhs
+  - name: free_cashflow
+    unit: INR_Lakhs
+
+body:
+  # EBITDA: earnings before interest, tax, depreciation, amortisation
+  - target: ebitda
+    expr: "revenue - opex"
+
+  # Maintenance capex during operations: periodic replacement provision
+  # (e.g. inverters, modules). Zero by default; grows with maintenance_capex_pct.
+  - target: capex_total_base
+    expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+  - target: capex_during_ops
+    expr: "capex_total_base * maintenance_capex_pct / 4.0 * is_operational"
+
+  # CFADS: post-tax, post-maintenance-capex, pre-debt-service
+  - target: cfads
+    expr: "ebitda - tax - capex_during_ops"
+
+  # Free cashflow: remaining after debt service
+  - target: free_cashflow
+    expr: "cfads - total_debt_service"
