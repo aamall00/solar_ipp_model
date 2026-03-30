@@ -758,6 +758,8 @@ calculation_blocks:
           unit: INR_Lakhs
         - name: equity_distribution
           unit: INR_Lakhs
+        - name: equity_infusion
+          unit: INR_Lakhs
       buckets:
         - name: opex_payment
           priority: 1
@@ -794,6 +796,8 @@ calculation_blocks:
           source: assumption.idc_capitalised
         - name: equity_distribution
           source: waterfall_block.equity_distribution
+        - name: equity_infusion
+          source: waterfall_block.equity_infusion
         - name: cfads
           source: cashflow_block.cfads
         - name: is_construction
@@ -803,6 +807,8 @@ calculation_blocks:
       outputs:
         - name: equity_invested
           unit: INR_Lakhs
+        - name: equity_infusion
+          unit: INR_Lakhs
         - name: equity_cashflow
           unit: INR_Lakhs
         - name: project_cashflow
@@ -810,8 +816,11 @@ calculation_blocks:
       body:
         - target: equity_invested
           expr: "(capex_drawdown - debt_drawdown + idc_per_period * (1.0 - idc_capitalised)) * is_construction * -1.0"
+        # equity_cashflow: construction outflows + operational distributions − operational infusions.
+        # equity_infusion (from waterfall) is positive when revenue falls short of obligations;
+        # it is subtracted here because it is an additional cash outflow from the equity investor.
         - target: equity_cashflow
-          expr: "equity_invested + equity_distribution"
+          expr: "equity_invested + equity_distribution - equity_infusion * is_operational"
         - target: project_cashflow
           expr: "capex_drawdown * is_construction * -1.0 + cfads * is_operational"
 
@@ -820,17 +829,15 @@ calculation_blocks:
   # ------------------------------------------------------------------
   solve_loops:
     # IDC capitalisation loop — runs BEFORE sculpting (assumption free_variable = prepended).
-    # Finds idc_supplement such that idc_total == idc_supplement (self-consistent circle):
-    #   larger debt → more IDC → idc_supplement grows → larger debt → ...
-    # target_expression multiplied by idc_capitalised so the loop trivially converges at
-    # idc_supplement=0 when idc_capitalised=0 (no change to base case).
+    # When idc_capitalised=1: executor _run_idc_forward_march solves the circular reference
+    # (IDC depends on closing debt which depends on IDC) analytically in one forward pass.
+    # When idc_capitalised=0: _run_idc_forward_march is a no-op; subgraph runs normally
+    # with idc_supplement=0 and the standard lag(cumulative_drawdown,1) YAML formula.
     - loop_id: idc_capitalisation
-      type: goal_seek
+      type: idc_forward_march
       free_variable: assumption.idc_supplement
-      target_expression: "assumption.idc_capitalised * idc_block.idc_total - assumption.idc_supplement"
+      target_expression: "idc_block.idc_total - assumption.idc_supplement"
       target_value: 0.0
-      tolerance: 1.0
-      max_iterations: 30
 
     - loop_id: debt_service_sculpting
       type: sculpting
@@ -927,6 +934,8 @@ model_wiring:
       to: returns_block.idc_per_period
     - from: waterfall_block.equity_distribution
       to: returns_block.equity_distribution
+    - from: waterfall_block.equity_infusion
+      to: returns_block.equity_infusion
     - from: cashflow_block.cfads
       to: returns_block.cfads
 
@@ -958,5 +967,6 @@ model_wiring:
 
     returns_summary:
       - returns_block.equity_invested
+      - returns_block.equity_infusion
       - returns_block.equity_cashflow
       - returns_block.project_cashflow

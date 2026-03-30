@@ -98,41 +98,57 @@ class TestGoalSeek:
 
     def test_idc_capitalisation_scenario(self):
         """
-        Realistic goal-seek: find debt_amount D such that
-            D = debt_pct × (capex + idc(D))
-        where idc = D × r × 1.5 quarters  (simplified mid-draw average)
+        Validates the per-period closed-form analytical solution used by
+        _run_idc_forward_march for idc_capitalised = 1.
 
-        Analytical solution:
-            D = 0.70 × (45000 + D × 0.024375 × 1.5)
-            D × (1 - 0.70 × 0.024375 × 1.5) = 31500
-            D = 31500 / (1 - 0.025594) ≈ 32328
+        New formulas (3 construction quarters, capex_schedule = [30%, 40%, 30%]):
+          IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
+          Total_Capex(t) = capex_draw(t) + IDC(t)
+          Debt(t)        = debt_pct × Total_Capex(t)
+
+        Closed-form per period (D_prev = prior cumulative debt):
+          total_capex(t) = (capex_draw(t) + D_prev × r_q) / (1 − debt_pct × r_q / 2)
+
+        This test verifies the formula produces self-consistent results:
+        i.e. IDC(t) = r_q × avg(D(t-1), D(t)) for every construction period.
         """
         capex = 45000.0
         debt_pct = 0.70
-        r_q = 0.0975 / 4  # 9.75% annual / 4 quarters
+        r_q = 0.0975 / 4          # 9.75% annual / 4 quarters = 0.024375
+        divisor = 1.0 - debt_pct * r_q / 2.0   # ≈ 0.991469
+        capex_schedule = [0.30, 0.40, 0.30]     # 3 construction quarters
+        capex_draws = [capex * f for f in capex_schedule]  # [13500, 18000, 13500]
 
-        def rhs(debt_amount: float) -> float:
-            idc = debt_amount * r_q * 1.5
-            return debt_pct * (capex + idc)
+        # Forward-march analytical solution
+        D = 0.0
+        idc_total = 0.0
+        for c in capex_draws:
+            tc = (c + D * r_q) / divisor
+            idc_t = tc - c
+            dd_t = debt_pct * tc
+            D_next = D + dd_t
 
-        # Self-referential: find D where rhs(D) - D = 0
-        result = goal_seek_solver(
-            objective=lambda x: rhs(x) - x,
-            loop_id="idc_goal_seek",
-            target_value=0.0,
-            x_init=31500.0,
-            bracket_low=28000.0,
-            bracket_high=40000.0,
-        )
-        assert result.converged
-        D = result.solution
-        # Verify: D equals the fixed-point of rhs(D)
-        idc_check = D * r_q * 1.5
-        expected = debt_pct * (capex + idc_check)
-        assert D == pytest.approx(expected, rel=1e-5)
-        # Analytical value: D = 31500 / (1 - 0.70*0.024375*1.5)
-        analytical = 31500.0 / (1.0 - 0.70 * r_q * 1.5)
-        assert D == pytest.approx(analytical, rel=1e-5)
+            # Verify: IDC(t) == r_q × average(opening, closing)
+            avg_balance = (D + D_next) / 2.0
+            assert idc_t == pytest.approx(r_q * avg_balance, rel=1e-9)
+
+            # Verify: closing_debt ≡ opening + debt_pct × (capex + IDC)
+            assert D_next == pytest.approx(D + debt_pct * (c + idc_t), rel=1e-9)
+
+            idc_total += idc_t
+            D = D_next
+
+        total_debt = D   # cumulative debt at COD
+        total_project_cost = capex + idc_total
+
+        # Debt = debt_pct × total_project_cost at the aggregate level
+        assert total_debt == pytest.approx(debt_pct * total_project_cost, rel=1e-6)
+
+        # Spot-check period-0 values (D_prev=0):
+        #   total_capex(0) = 13500 / (1 - 0.70×0.024375/2) ≈ 13616.3
+        tc0 = capex_draws[0] / divisor
+        assert tc0 == pytest.approx(13616.3, rel=1e-4)
+        assert (tc0 - capex_draws[0]) == pytest.approx(116.3, rel=1e-3)
 
     def test_result_has_iteration_count(self):
         result = goal_seek_solver(

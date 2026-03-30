@@ -70,6 +70,7 @@ class SolveLoopType(str, Enum):
     goal_seek = "goal_seek"
     sculpting = "sculpting"
     fixed_point = "fixed_point"
+    idc_forward_march = "idc_forward_march"
 
 
 class DebtStructure(str, Enum):

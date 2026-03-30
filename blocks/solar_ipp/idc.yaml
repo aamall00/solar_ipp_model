@@ -1,20 +1,35 @@
 # IDC Block — Interest During Construction
 #
-# Spec formula (simple interest on outstanding balance):
-#   idc[t] = cumsum(debt_drawn)[t-1] × (interest_rate / periods_per_year)
+# Two modes depending on idc_capitalised assumption:
+#
+# idc_capitalised = 0  (default, equity-funded IDC):
+#   idc[t] = lag(cumulative_drawdown, 1)[t] × (interest_rate / 4) × is_construction[t]
+#   Uses opening balance (prior-period cumulative debt drawdown).
+#   IDC is an equity cost; does not increase the debt base.
+#
+# idc_capitalised = 1  (debt-funded IDC, new formulas):
+#   IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
+#   Total_Capex(t) = capex(t) + IDC(t)
+#   Debt(t)        = debt_pct × Total_Capex(t)
+#
+#   opening_debt(t) = cumulative_debt(t-1)  [zero at financial close]
+#   closing_debt(t) = cumulative_debt(t-1) + Debt(t)
+#
+#   Circular reference resolved analytically per period:
+#     total_capex(t) = (capex(t) + D(t-1) × r_q) / (1 − debt_pct × r_q / 2)
+#   Executor _run_idc_forward_march writes idc_block.*, debt_drawdown_block.*,
+#   and debt_sizing_block.* directly; this YAML body is NOT re-evaluated for cap=1.
 #
 # Key implementation decisions
 # ------------------------------
 # 1. RATE  — simple division: interest_rate / 4.0 (quarterly model).
-#    The previous implementation used the compound equivalent
-#    (1 + rate)^0.25 − 1, which overstates IDC by ~6 bps per period at 9.75%.
 #    Project finance term-sheets quote annual nominal (simple) rates for IDC.
 #
-# 2. TIMING — lag(cumulative_drawdown, 1) gives the balance outstanding at the
-#    START of the current period (i.e. drawn in prior periods only).
-#    The previous implementation used unlagged cumulative_drawdown, which
-#    included the current-period draw and therefore charged interest one period
-#    too early.  At lag(., 1), period 0 correctly carries zero IDC.
+# 2. TIMING (cap=0) — lag(cumulative_drawdown, 1) gives the opening balance.
+#    Period 0 correctly carries zero IDC.
+#
+# 3. AVERAGE BALANCE (cap=1) — uses (opening + closing) / 2 per period,
+#    implemented analytically in the executor forward-march.
 #
 # Assumptions consumed:
 #   interest_rate   — Annual nominal interest rate, e.g. 0.0975

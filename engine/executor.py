@@ -573,7 +573,14 @@ class ModelExecutor:
     ) -> None:
         """
         Waterfall block: allocate cash to priority buckets in sequence.
-        Remaining cash after all buckets is stored as '{block_id}.residual'.
+
+        Each bucket is always fully met regardless of available cash.  Any
+        period where cumulative bucket targets exceed revenue is funded by an
+        equity infusion (an additional outflow from the equity perspective).
+        The infusion amount is stored as '{block_id}.equity_infusion' and
+        must be deducted from equity_cashflow in the returns block.
+
+        Remaining cash after all buckets (>= 0) is the equity distribution.
         """
         ev = compiled.evaluator
         n = compiled.n_periods
@@ -590,14 +597,15 @@ class ModelExecutor:
 
         remaining = available.copy()
 
-        # Process buckets in priority order
+        # Process buckets in priority order — always allocate the full target.
+        # remaining is allowed to go negative; that deficit is the equity infusion.
         for bucket in sorted(block.buckets, key=lambda b: b.priority):
             target = ev.evaluate(bucket.target_expr, ctx)
             target_arr = np.asarray(target, dtype=np.float64)
             if target_arr.ndim == 0:
                 target_arr = np.full(n, float(target_arr))
 
-            allocated = np.minimum(np.maximum(remaining, 0.0), target_arr)
+            allocated = target_arr.copy()
             remaining = remaining - allocated
 
             namespace[f"{block.block_id}.{bucket.name}"] = allocated
@@ -610,10 +618,21 @@ class ModelExecutor:
                 values=allocated.copy(),
             ))
 
-        # Residual (equity distribution or overflow)
+        # Shortfall (remaining < 0): equity must inject cash to cover obligations.
+        equity_infusion = np.maximum(-remaining, 0.0)
+        # Surplus (remaining > 0): distributed to equity.
         residual = np.maximum(remaining, 0.0)
+
+        namespace[f"{block.block_id}.equity_infusion"] = equity_infusion
         namespace[f"{block.block_id}.residual"] = residual
         namespace[f"{block.block_id}.equity_distribution"] = residual
+
+        audit.append(AuditEntry(
+            variable=f"{block.block_id}.equity_infusion",
+            expression="max(-(available_cash - sum_of_bucket_targets), 0)",
+            block_id=block.block_id,
+            values=equity_infusion.copy(),
+        ))
 
         # Also store declared outputs that were computed as bucket allocations
         for out in block.outputs:
@@ -699,6 +718,160 @@ class ModelExecutor:
             self._run_sculpting(loop, subgraph, compiled, namespace, audit, convergence, warnings)
         elif loop.type == SolveLoopType.fixed_point:
             self._run_fixed_point(loop, subgraph, compiled, namespace, audit, convergence)
+        elif loop.type == SolveLoopType.idc_forward_march:
+            self._run_idc_forward_march(loop, subgraph, compiled, namespace, audit, convergence)
+
+    def _run_idc_forward_march(
+        self,
+        loop: SolveLoop,
+        subgraph: List[EvaluationStep],
+        compiled: CompiledModel,
+        namespace: Dict[str, Any],
+        audit: List[AuditEntry],
+        convergence: List[ConvergenceMetadata],
+    ) -> None:
+        """
+        Analytical forward-march for IDC capitalisation (idc_capitalised = 1).
+
+        New formulas (per requirements):
+          IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
+          opening_debt(t) = cumulative_debt(t-1)   [zero at t=0]
+          closing_debt(t) = cumulative_debt(t-1) + debt_drawdown(t)
+          Total_Capex(t) = capex(t) + IDC(t)
+          Debt(t)        = debt_pct × Total_Capex(t)
+
+        Closed-form solution per period — no iteration needed:
+          Substituting closing_debt into the average-balance IDC formula gives:
+            IDC(t) × (1 − r_q × debt_pct / 2) = r_q × (D(t-1) + debt_pct × capex(t) / 2)
+          →  total_capex(t) = (capex(t) + D(t-1) × r_q) / (1 − debt_pct × r_q / 2)
+
+        The divisor (1 − debt_pct × r_q / 2) ≈ 0.991 for typical inputs; always stable.
+
+        Execution plan context:
+          The idc_forward_march loop step is inserted in the main plan at the
+          position of the first fm_owned block, so prerequisite blocks (e.g.
+          construction_block) have already populated the namespace.  After this
+          method returns, the main plan continues with the non-fm downstream
+          blocks (debt_service_block, cashflow_block, etc.).
+
+          idc_capitalised = 0: guard path runs fm_owned blocks via YAML bodies
+            and returns.  Downstream blocks run in the main plan as normal.
+          idc_capitalised = 1: analytical values written; no subgraph re-run.
+        """
+        n = compiled.n_periods
+        ppy = compiled.periods_per_year
+
+        # --- Guard: standard YAML path when idc_capitalised = 0 ---
+        idc_capitalised = float(
+            np.asarray(namespace.get("assumption.idc_capitalised", 0.0)).flat[0]
+        )
+        if idc_capitalised < 0.5:
+            # fm_owned blocks are excluded from the main execution plan, so we
+            # must run them here via their YAML bodies.  Downstream non-fm blocks
+            # (debt_service_block, cashflow_block, …) remain in the main plan and
+            # will be executed there after this loop step returns.
+            _fm_blocks = {"idc_block", "debt_drawdown_block", "debt_sizing_block"}
+            for step in subgraph:
+                if step.kind == "block" and step.block.block_id in _fm_blocks:
+                    self._execute_block(step.block, compiled, namespace, audit)
+            convergence.append(ConvergenceMetadata(
+                loop_id=loop.loop_id,
+                converged=True,
+                iterations=0,
+                final_residual=0.0,
+                final_free_variable_value=0.0,
+            ))
+            return
+
+        # --- Read inputs from namespace ---
+        capex_drawdown = np.asarray(
+            namespace.get("construction_block.capex_drawdown", np.zeros(n)), dtype=np.float64
+        )
+        debt_pct = float(np.asarray(namespace.get("assumption.debt_pct", 0.7)).flat[0])
+        interest_rate = float(np.asarray(namespace.get("assumption.interest_rate", 0.0975)).flat[0])
+        is_construction = np.asarray(
+            namespace.get("phase.is_construction", np.zeros(n)), dtype=np.float64
+        )
+
+        r_q = interest_rate / ppy                    # quarterly rate
+        divisor = 1.0 - debt_pct * r_q / 2.0        # always < 1, always > 0 for sane inputs
+
+        # --- Forward-march: one pass through all periods ---
+        idc_per_period = np.zeros(n, dtype=np.float64)
+        total_capex_per_period = np.zeros(n, dtype=np.float64)
+        debt_drawdown_arr = np.zeros(n, dtype=np.float64)
+        cumulative_debt = np.zeros(n, dtype=np.float64)
+
+        D_prev = 0.0  # opening cumulative debt (= 0 at financial close)
+        for t in range(n):
+            if is_construction[t] > 0.5:
+                c = float(capex_drawdown[t])
+                # Exact closed-form for total_capex(t):
+                tc = (c + D_prev * r_q) / divisor
+                idc_t = tc - c                    # = IDC(t)
+                dd_t = debt_pct * tc              # = Debt(t)
+            else:
+                tc = 0.0
+                idc_t = 0.0
+                dd_t = 0.0
+
+            total_capex_per_period[t] = tc
+            idc_per_period[t] = idc_t
+            debt_drawdown_arr[t] = dd_t
+            D_curr = D_prev + dd_t
+            cumulative_debt[t] = D_curr
+            D_prev = D_curr
+
+        cumulative_idc = np.cumsum(idc_per_period)
+        idc_total_val = float(np.max(cumulative_idc))
+        idc_total_series = np.full(n, idc_total_val, dtype=np.float64)
+
+        total_project_cost_val = float(np.sum(total_capex_per_period))
+        debt_amount_val = float(np.max(cumulative_debt))    # = total debt at COD
+        equity_amount_val = total_project_cost_val - debt_amount_val
+
+        # --- Write analytical results to namespace ---
+        namespace["idc_block.idc_per_period"] = idc_per_period
+        namespace["idc_block.cumulative_idc"] = cumulative_idc
+        namespace["idc_block.idc_total"] = idc_total_series
+
+        namespace["debt_drawdown_block.drawdown"] = debt_drawdown_arr
+        namespace["debt_drawdown_block.cumulative_drawdown"] = cumulative_debt
+
+        namespace["debt_sizing_block.total_project_cost"] = np.full(n, total_project_cost_val)
+        namespace["debt_sizing_block.debt_amount"] = np.full(n, debt_amount_val)
+        namespace["debt_sizing_block.equity_amount"] = np.full(n, equity_amount_val)
+
+        # Keep idc_supplement in sync (used for reporting and as loop free_variable)
+        namespace["assumption.idc_supplement"] = idc_total_val
+
+        # Audit the three key IDC outputs
+        for var_name, arr in [
+            ("idc_block.idc_per_period", idc_per_period),
+            ("idc_block.cumulative_idc", cumulative_idc),
+            ("debt_drawdown_block.cumulative_drawdown", cumulative_debt),
+        ]:
+            audit.append(AuditEntry(
+                variable=var_name,
+                expression="idc_forward_march_analytical",
+                block_id=var_name.split(".")[0],
+                values=arr.copy(),
+            ))
+
+        # Downstream non-fm blocks (debt_service_block, cashflow_block, etc.) are
+        # NOT run here.  The idc_forward_march loop step is inserted at the position
+        # of the first fm_owned block in the main evaluation plan, so all upstream
+        # prerequisite blocks have already run before this method is called.
+        # After this method returns, the main plan continues with the non-fm blocks
+        # that follow the fm_owned blocks (including the sculpting loop).
+
+        convergence.append(ConvergenceMetadata(
+            loop_id=loop.loop_id,
+            converged=True,
+            iterations=0,          # analytical — no iteration
+            final_residual=0.0,
+            final_free_variable_value=idc_total_val,
+        ))
 
     def _run_goal_seek(
         self,
@@ -1154,15 +1327,42 @@ class ModelExecutor:
         if not solve_loops:
             return [EvaluationStep(kind="block", block=b) for b in sorted_blocks]
 
-        # Assumption-based loops must fire BEFORE any blocks, with the full
-        # block list as the subgraph (the assumption feeds into every block).
-        # Block-level loops fire after their free-variable block, with remaining
-        # blocks as the subgraph.
         plan: List[EvaluationStep] = []
         handled_loop_ids: set = set()
 
-        # 1. Prepend assumption-based loops (subgraph = all blocks)
+        # idc_forward_march owns these blocks entirely — it writes their outputs
+        # analytically and must be the sole evaluator.  Excluding them from the
+        # top-level plan prevents their YAML bodies from overwriting the correct
+        # analytical values after the loop completes.
+        #
+        # IMPORTANT: idc_forward_march is NOT prepended as an assumption-based loop.
+        # It is inserted at the position of the FIRST fm_owned block in topological
+        # order, so that prerequisite blocks (e.g. construction_block) have already
+        # run and populated the namespace before the analytical forward-march reads
+        # construction_block.capex_drawdown.
+        _IDC_FM_BLOCKS = {"idc_block", "debt_drawdown_block", "debt_sizing_block"}
+        fm_owned: set = set()
+        idc_fm_loop = None
         for sl in solve_loops:
+            if sl.type == SolveLoopType.idc_forward_march:
+                fm_owned = _IDC_FM_BLOCKS
+                idc_fm_loop = sl
+                break
+
+        # Find the index of the first fm_owned block in sorted order.
+        # The idc_forward_march loop step will be inserted just before it.
+        idc_fm_insert_idx: int = len(sorted_blocks)  # default: end
+        if idc_fm_loop is not None:
+            for i, b in enumerate(sorted_blocks):
+                if b.block_id in fm_owned:
+                    idc_fm_insert_idx = i
+                    break
+
+        # 1. Prepend assumption-based loops that are NOT idc_forward_march
+        #    (subgraph = all blocks; assumption feeds into every block)
+        for sl in solve_loops:
+            if idc_fm_loop is not None and sl.loop_id == idc_fm_loop.loop_id:
+                continue  # handled positionally below
             if sl.free_variable.startswith("assumption."):
                 subgraph = [EvaluationStep(kind="block", block=b) for b in sorted_blocks]
                 plan.append(EvaluationStep(
@@ -1172,10 +1372,29 @@ class ModelExecutor:
                 ))
                 handled_loop_ids.add(sl.loop_id)
 
-        # 2. Block-level loops: insert after the block that owns the free variable
-        for block in sorted_blocks:
+        # 2. Iterate sorted_blocks; insert idc_fm loop at idc_fm_insert_idx,
+        #    then handle block-level loops normally.
+        for i, block in enumerate(sorted_blocks):
+            # Insert idc_forward_march loop before the first fm_owned block
+            if idc_fm_loop is not None and i == idc_fm_insert_idx:
+                # Subgraph = blocks from here to end (fm_owned included so the
+                # guard path can run them via YAML when idc_capitalised=0)
+                remaining = sorted_blocks[idc_fm_insert_idx:]
+                subgraph = [EvaluationStep(kind="block", block=b) for b in remaining]
+                plan.append(EvaluationStep(
+                    kind="solve_loop",
+                    solve_loop=idc_fm_loop,
+                    loop_subgraph=subgraph,
+                ))
+                handled_loop_ids.add(idc_fm_loop.loop_id)
+
+            # Skip fm_owned blocks from the main plan
+            if block.block_id in fm_owned:
+                continue
+
             plan.append(EvaluationStep(kind="block", block=block))
 
+            # Block-level loops: insert after the block that owns the free variable
             for sl in solve_loops:
                 if sl.loop_id in handled_loop_ids:
                     continue

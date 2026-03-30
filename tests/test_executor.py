@@ -626,7 +626,241 @@ class TestFixedPointLoop:
 
 
 # ===========================================================================
-# 8. TestRunEnd2End
+# 8. TestIDCForwardMarch
+# ===========================================================================
+
+
+class TestIDCForwardMarch:
+    """
+    Validates _run_idc_forward_march using known analytical values.
+
+    Setup:
+      capex = 45,000 INR Lakhs, capex_schedule = [30%, 40%, 30%] over 3 quarters
+      debt_pct = 0.70, interest_rate = 9.75% pa → r_q = 0.024375
+      divisor = 1 − 0.70 × 0.024375 / 2 ≈ 0.991469
+
+    Period-0 spot-check (D_prev = 0):
+      total_capex(0) = 13500 / 0.991469 ≈ 13616.3
+      IDC(0)         = 13616.3 − 13500 = 116.3
+      debt_draw(0)   = 0.70 × 13616.3 = 9531.4
+    """
+
+    def setup_method(self):
+        self.executor = ModelExecutor()
+        self.ppy = 4
+        self.n_construction = 3
+        self.n_ops = 20
+        self.n = self.n_construction + self.n_ops
+        self.capex_total = 45000.0
+        self.debt_pct = 0.70
+        self.r_q = 0.0975 / 4
+        self.capex_schedule = [0.30, 0.40, 0.30] + [0.0] * self.n_ops
+        self.capex_draws = [self.capex_total * f for f in self.capex_schedule[:self.n_construction]]
+
+        cod = self.n_construction
+        mat = self.n - 1
+
+        skeleton = ProjectSkeleton(
+            model_id="idc_fm_test",
+            project_type=ProjectType.solar_ipp,
+            periods_per_year=self.ppy,
+            construction_periods=self.n_construction,
+            operations_periods=self.n_ops,
+            milestones=Milestones(financial_close=0, cod=cod, debt_maturity=mat),
+            phases=_phases(self.n, cod, mat),
+        )
+
+        construction_block = CalculationBlock(
+            block_id="construction_block",
+            category=BlockCategory.construction,
+            inputs=[
+                BlockInput(name="capex_per_mw",    source="assumption.capex_per_mw"),
+                BlockInput(name="capacity_mw",     source="assumption.capacity_mw"),
+                BlockInput(name="capex_schedule",  source="assumption.capex_schedule"),
+                BlockInput(name="is_construction", source="phase.is_construction"),
+            ],
+            outputs=[
+                BlockOutput(name="capex_drawdown",  unit="INR_Lakhs"),
+                BlockOutput(name="cumulative_capex", unit="INR_Lakhs"),
+            ],
+            body=[
+                CalculationStep(target="capex_drawdown",
+                                expr="capex_per_mw * capacity_mw * capex_schedule * is_construction"),
+                CalculationStep(target="cumulative_capex",
+                                expr="cumsum(capex_drawdown)"),
+            ],
+        )
+
+        # idc_block: body is for idc_capitalised=0 fallback; forward_march overwrites outputs
+        idc_block = CalculationBlock(
+            block_id="idc_block",
+            category=BlockCategory.idc,
+            inputs=[
+                BlockInput(name="cumulative_drawdown",
+                           source="debt_drawdown_block.cumulative_drawdown"),
+                BlockInput(name="interest_rate",    source="assumption.interest_rate"),
+                BlockInput(name="is_construction",  source="phase.is_construction"),
+            ],
+            outputs=[
+                BlockOutput(name="idc_per_period", unit="INR_Lakhs"),
+                BlockOutput(name="cumulative_idc",  unit="INR_Lakhs"),
+                BlockOutput(name="idc_total",       unit="INR_Lakhs"),
+            ],
+            body=[
+                CalculationStep(target="r_simple",
+                                expr="scalar_to_series(interest_rate / 4.0)"),
+                CalculationStep(target="idc_per_period",
+                                expr="lag(cumulative_drawdown, 1) * r_simple * is_construction"),
+                CalculationStep(target="cumulative_idc", expr="cumsum(idc_per_period)"),
+                CalculationStep(target="idc_total",
+                                expr="scalar_to_series(max(cumulative_idc))"),
+            ],
+        )
+
+        debt_drawdown_block = CalculationBlock(
+            block_id="debt_drawdown_block",
+            category=BlockCategory.debt_drawdown,
+            inputs=[
+                BlockInput(name="debt_amount",     source="debt_sizing_block.debt_amount"),
+                BlockInput(name="capex_schedule",  source="assumption.capex_schedule"),
+                BlockInput(name="is_construction", source="phase.is_construction"),
+            ],
+            outputs=[
+                BlockOutput(name="drawdown",            unit="INR_Lakhs"),
+                BlockOutput(name="cumulative_drawdown", unit="INR_Lakhs"),
+            ],
+            body=[
+                CalculationStep(target="drawdown",
+                                expr="debt_amount * capex_schedule * is_construction"),
+                CalculationStep(target="cumulative_drawdown", expr="cumsum(drawdown)"),
+            ],
+        )
+
+        debt_sizing_block = CalculationBlock(
+            block_id="debt_sizing_block",
+            category=BlockCategory.debt_sizing,
+            inputs=[
+                BlockInput(name="capex_per_mw",   source="assumption.capex_per_mw"),
+                BlockInput(name="capacity_mw",    source="assumption.capacity_mw"),
+                BlockInput(name="debt_pct",       source="assumption.debt_pct"),
+                BlockInput(name="idc_supplement", source="assumption.idc_supplement"),
+            ],
+            outputs=[
+                BlockOutput(name="total_project_cost", unit="INR_Lakhs"),
+                BlockOutput(name="debt_amount",        unit="INR_Lakhs"),
+                BlockOutput(name="equity_amount",      unit="INR_Lakhs"),
+            ],
+            body=[
+                CalculationStep(
+                    target="total_project_cost",
+                    expr="scalar_to_series(capex_per_mw * capacity_mw + idc_supplement)"),
+                CalculationStep(
+                    target="debt_amount",
+                    expr="scalar_to_series((capex_per_mw * capacity_mw + idc_supplement)"
+                         " * debt_pct)"),
+                CalculationStep(
+                    target="equity_amount",
+                    expr="scalar_to_series((capex_per_mw * capacity_mw + idc_supplement)"
+                         " * (1.0 - debt_pct))"),
+            ],
+        )
+
+        idc_loop = SolveLoop(
+            loop_id="idc_capitalisation",
+            type=SolveLoopType.idc_forward_march,
+            free_variable="assumption.idc_supplement",
+            target_expression="idc_block.idc_total - assumption.idc_supplement",
+            target_value=0.0,
+        )
+
+        schema = AssumptionSchema(assumptions=[
+            AssumptionDefinition(name="capex_per_mw",   type=AssumptionType.scalar,
+                                 unit="INR_Lakhs_per_MW", value=450.0),
+            AssumptionDefinition(name="capacity_mw",    type=AssumptionType.scalar,
+                                 unit="MW", value=100.0),
+            AssumptionDefinition(name="debt_pct",       type=AssumptionType.scalar,
+                                 unit="ratio", value=self.debt_pct),
+            AssumptionDefinition(name="interest_rate",  type=AssumptionType.scalar,
+                                 unit="ratio", value=0.0975),
+            AssumptionDefinition(name="idc_supplement", type=AssumptionType.scalar,
+                                 unit="INR_Lakhs", value=0.0),
+            AssumptionDefinition(name="capex_schedule", type=AssumptionType.schedule,
+                                 unit="fraction", value=self.capex_schedule),
+        ])
+
+        model = ModelDefinition(
+            project_skeleton=skeleton,
+            assumption_schema=schema,
+            calculation_blocks=CalculationBlocks(
+                blocks=[construction_block, debt_sizing_block,
+                        debt_drawdown_block, idc_block],
+                solve_loops=[idc_loop],
+            ),
+            model_wiring=ModelWiring(),
+        )
+        self.compiled = self.executor.compile(model)
+
+    def test_converges_analytically(self):
+        """idc_forward_march always converges (0 iterations)."""
+        results = self.executor.run(self.compiled)
+        assert results.convergence[0].converged
+        assert results.convergence[0].iterations == 0
+        assert results.convergence[0].final_residual == 0.0
+
+    def test_idc_period0_spot_check(self):
+        """Period-0: D_prev=0, IDC = 13500 × r_q / divisor − 0 ≈ 116.3."""
+        results = self.executor.run(self.compiled)
+        idc = results.variables["idc_block.idc_per_period"]
+        divisor = 1.0 - self.debt_pct * self.r_q / 2.0
+        tc0 = self.capex_draws[0] / divisor
+        expected_idc0 = tc0 - self.capex_draws[0]
+        assert float(idc[0]) == pytest.approx(expected_idc0, rel=1e-6)
+
+    def test_average_balance_formula_holds(self):
+        """
+        For every construction period:
+          IDC(t) == r_q × (opening_debt(t) + closing_debt(t)) / 2
+        """
+        results = self.executor.run(self.compiled)
+        idc = results.variables["idc_block.idc_per_period"]
+        cum_debt = results.variables["debt_drawdown_block.cumulative_drawdown"]
+
+        for t in range(self.n_construction):
+            opening = float(cum_debt[t - 1]) if t > 0 else 0.0
+            closing = float(cum_debt[t])
+            expected = self.r_q * (opening + closing) / 2.0
+            assert float(idc[t]) == pytest.approx(expected, rel=1e-6), \
+                f"Period {t}: IDC={idc[t]:.4f}, expected={expected:.4f}"
+
+    def test_debt_equals_debt_pct_times_total_capex_per_period(self):
+        """Debt(t) = debt_pct × (capex(t) + IDC(t)) for every construction period."""
+        results = self.executor.run(self.compiled)
+        idc = results.variables["idc_block.idc_per_period"]
+        drawdown = results.variables["debt_drawdown_block.drawdown"]
+        capex_draw = results.variables["construction_block.capex_drawdown"]
+
+        for t in range(self.n_construction):
+            expected = self.debt_pct * (float(capex_draw[t]) + float(idc[t]))
+            assert float(drawdown[t]) == pytest.approx(expected, rel=1e-6), \
+                f"Period {t}: drawdown={drawdown[t]:.4f}, expected={expected:.4f}"
+
+    def test_total_debt_equals_debt_pct_times_total_project_cost(self):
+        """Aggregate: total_debt = debt_pct × (capex + total_IDC)."""
+        results = self.executor.run(self.compiled)
+        debt_amount = float(results.variables["debt_sizing_block.debt_amount"][0])
+        idc_total   = float(results.variables["idc_block.idc_total"][0])
+        assert debt_amount == pytest.approx(self.debt_pct * (self.capex_total + idc_total), rel=1e-6)
+
+    def test_no_idc_after_construction(self):
+        """IDC is zero outside construction."""
+        results = self.executor.run(self.compiled)
+        idc = results.variables["idc_block.idc_per_period"]
+        for t in range(self.n_construction, self.n):
+            assert float(idc[t]) == pytest.approx(0.0, abs=1e-8)
+
+
+# ===========================================================================
+# 9. TestRunEnd2End
 # ===========================================================================
 
 

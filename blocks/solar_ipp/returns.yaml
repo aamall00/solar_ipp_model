@@ -30,6 +30,8 @@ inputs:
     source: assumption.idc_capitalised
   - name: equity_distribution
     source: waterfall_block.equity_distribution
+  - name: equity_infusion
+    source: waterfall_block.equity_infusion
   - name: cfads
     source: cashflow_block.cfads
   - name: is_construction
@@ -39,6 +41,8 @@ inputs:
 
 outputs:
   - name: equity_invested
+    unit: INR_Lakhs
+  - name: equity_infusion
     unit: INR_Lakhs
   - name: equity_cashflow
     unit: INR_Lakhs
@@ -53,9 +57,11 @@ body:
   - target: equity_invested
     expr: "(capex_drawdown - debt_drawdown + idc_per_period * (1.0 - idc_capitalised)) * is_construction * -1.0"
 
-  # Total equity cashflow: outflow during construction + distributions during ops
+  # Total equity cashflow: construction outflows + ops distributions − ops infusions.
+  # equity_infusion (from waterfall) is positive when revenue < obligations; subtracted
+  # here because it is an additional cash outflow from the equity investor.
   - target: equity_cashflow
-    expr: "equity_invested + equity_distribution"
+    expr: "equity_invested + equity_distribution - equity_infusion * is_operational"
 
   # Project cashflow (ungeared): capex outflow + CFADS inflows
   - target: project_cashflow

@@ -414,20 +414,20 @@ class BlueprintAgent:
             "max_iterations":    50,
         })
 
-        # IDC goal_seek — only when idc_capitalised = 1
+        # IDC forward-march — only when idc_capitalised = 1
+        # Uses closed-form per-period analytical solution (no iteration):
+        #   IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
+        #   Total_Capex(t) = capex(t) + IDC(t)
+        #   Debt(t)        = debt_pct × Total_Capex(t)
+        # free_variable/target_expression kept so the DSL cycle-checker accepts the loop.
         idc_capitalised = float(a.get("idc_capitalised", 0.0))
         if idc_capitalised >= 0.5:
             loops.append({
                 "loop_id":           "idc_capitalisation",
-                "type":              "goal_seek",
-                # Executor adjusts assumption.idc_supplement until the expression = 0
+                "type":              "idc_forward_march",
                 "free_variable":     "assumption.idc_supplement",
-                # idc_total is a constant series = scalar_to_series(max(cumulative_idc))
-                # goal_seek finds idc_supplement s.t. mean(idc_total) - idc_supplement = 0
                 "target_expression": "idc_block.idc_total - assumption.idc_supplement",
                 "target_value":      0.0,
-                "tolerance":         1.0,    # INR Lakhs — 1 Lakh convergence
-                "max_iterations":    30,
             })
 
         return loops
