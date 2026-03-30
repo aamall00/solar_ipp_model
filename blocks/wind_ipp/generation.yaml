@@ -1,0 +1,44 @@
+# Generation Block — Wind energy generation
+#
+# Calculates quarterly AC generation from installed capacity, P50 capacity
+# factor, and turbine availability factor.
+# Hours per quarter = 8760 / 4 = 2190.
+# Generation is zero during construction (masked by phase.is_operational).
+#
+# Assumptions consumed:
+#   capacity_mw        — Installed AC capacity in MW
+#   capacity_factor    — P50 annual capacity factor, e.g. 0.30 (= 30%)
+#   availability_factor— Annual turbine availability, e.g. 0.95 (= 95%)
+#   auxiliary_consumption — Station auxiliary consumption ratio, e.g. 0.005
+
+block_id: generation_block
+category: generation
+block_type: standard
+description: "Quarterly AC generation (kWh) from wind capacity factor and availability"
+
+inputs:
+  - name: capacity_mw
+    source: assumption.capacity_mw
+  - name: capacity_factor
+    source: assumption.capacity_factor
+  - name: availability_factor
+    source: assumption.availability_factor
+  - name: aux_consumption
+    source: assumption.auxiliary_consumption
+  - name: is_operational
+    source: phase.is_operational
+
+outputs:
+  - name: gross_generation_kwh
+    unit: kWh
+  - name: net_generation_kwh
+    unit: kWh
+
+body:
+  # Gross generation: capacity × P50 CF × availability × 2190 hrs/quarter
+  - target: gross_generation_kwh
+    expr: "capacity_mw * 1000.0 * capacity_factor * availability_factor * 2190.0 * is_operational"
+
+  # Net generation after station auxiliary consumption
+  - target: net_generation_kwh
+    expr: "gross_generation_kwh * (1.0 - aux_consumption)"

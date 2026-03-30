@@ -37,6 +37,28 @@ BLOCK_FILES = [
 ]
 
 
+def load_block_raw(filename: str) -> dict:
+    """
+    Load a single block YAML file and return the raw dict.
+    Use this when the block needs to be mutated before assembly (e.g. in BlueprintAgent).
+
+    Parameters
+    ----------
+    filename : str
+        Filename (e.g. "generation.yaml") relative to this package directory,
+        or an absolute path string.
+
+    Returns
+    -------
+    dict
+    """
+    path = Path(filename)
+    if not path.is_absolute():
+        path = _BLOCK_DIR / filename
+    with open(path, "r", encoding="utf-8") as fh:
+        return yaml.safe_load(fh)
+
+
 def load_block(filename: str) -> CalculationBlock:
     """
     Load a single block YAML file and return a validated CalculationBlock.
@@ -51,12 +73,23 @@ def load_block(filename: str) -> CalculationBlock:
     -------
     CalculationBlock
     """
-    path = Path(filename)
-    if not path.is_absolute():
-        path = _BLOCK_DIR / filename
-    with open(path, "r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh)
-    return CalculationBlock.model_validate(data)
+    return CalculationBlock.model_validate(load_block_raw(filename))
+
+
+def load_all_blocks_raw() -> Dict[str, dict]:
+    """
+    Load all 14 solar IPP block YAML files as raw dicts.
+    Use this when blocks need to be mutated before assembly (e.g. in BlueprintAgent).
+
+    Returns
+    -------
+    dict mapping block_id → raw block dict, in BLOCK_FILES order
+    """
+    blocks: Dict[str, dict] = {}
+    for fname in BLOCK_FILES:
+        block = load_block_raw(fname)
+        blocks[block["block_id"]] = block
+    return blocks
 
 
 def load_all_blocks() -> Dict[str, CalculationBlock]:

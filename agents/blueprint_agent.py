@@ -55,10 +55,11 @@ from dsl.parser import load_model_from_dict
 from dsl.types import ModelDefinition, ValidationResult
 
 # ---------------------------------------------------------------------------
-# Block library path
+# Paths
 # ---------------------------------------------------------------------------
 
 _BLOCKS_DIR = pathlib.Path(__file__).parent.parent / "blocks" / "solar_ipp"
+_TEMPLATE_PATH = pathlib.Path(__file__).parent.parent / "dsl" / "templates" / "solar_ipp_base.yaml"
 
 # Expected block IDs in load order (topological)
 _BLOCK_ORDER = [
@@ -97,20 +98,25 @@ Do not repeat the table of values — only interpret the choices and flag any ri
 
 class BlueprintAgent:
     """
-    Converts validated solar IPP assumptions into a complete ModelDefinition
+    Converts validated IPP assumptions into a complete ModelDefinition
     plus a YAML string representation.
 
     Parameters
     ----------
-    model  : Anthropic model for Claude-assisted review and explanation.
-    client : Pre-configured anthropic.Anthropic client (uses env var if None).
+    asset_type : "solar" (default) or "wind" — selects the block library and schema.
+    model      : Anthropic model for Claude-assisted review and explanation.
+    client     : Pre-configured anthropic.Anthropic client (uses env var if None).
     """
 
     def __init__(
         self,
+        asset_type: str = "solar",
         model: str = "claude-sonnet-4-6",
         client: Optional[anthropic.Anthropic] = None,
     ) -> None:
+        from engine.asset_registry import get_asset
+        self.asset_type = asset_type.lower().strip()
+        self._asset_meta = get_asset(self.asset_type)
         self.model = model
         self.client = client or anthropic.Anthropic()
         self._block_library: Optional[Dict[str, Dict[str, Any]]] = None
@@ -183,21 +189,17 @@ class BlueprintAgent:
 
     def _load_block_library(self) -> Dict[str, Dict[str, Any]]:
         """
-        Load all block YAML files from blocks/solar_ipp/ and return a dict
+        Load all block YAML files for this asset type and return a dict
         keyed by block_id.  Result is cached after the first call.
         """
         if self._block_library is not None:
             return self._block_library
-
-        library: Dict[str, Dict[str, Any]] = {}
-        for path in _BLOCKS_DIR.glob("*.yaml"):
-            with open(path, encoding="utf-8") as fh:
-                block = yaml.safe_load(fh)
-            if isinstance(block, dict) and "block_id" in block:
-                library[block["block_id"]] = block
-
-        self._block_library = library
-        return library
+        if self.asset_type == "wind":
+            from blocks.wind_ipp import load_all_blocks_raw
+        else:
+            from blocks.solar_ipp import load_all_blocks_raw
+        self._block_library = load_all_blocks_raw()
+        return self._block_library
 
     # ------------------------------------------------------------------
     # Private: model dict construction (pure Python)
@@ -224,13 +226,16 @@ class BlueprintAgent:
         if debt_maturity >= total_periods:
             debt_maturity = total_periods - 1
 
-        capacity_mw = float(a.get("capacity_mw", 100))
-        tariff      = float(a.get("tariff", 2.65))
-        model_id    = _slugify(f"solar_ipp_{int(capacity_mw)}mw_t{tariff:.2f}")
+        capacity_mw  = float(a.get("capacity_mw", 100))
+        tariff       = float(a.get("tariff", 2.65))
+        project_type = self._asset_meta["project_type"]
+        cf_key       = self._asset_meta["cuf_or_cf_key"]
+        cf_val       = float(a.get(cf_key, self._asset_meta["cuf_or_cf_default"]))
+        model_id     = _slugify(f"{project_type}_{int(capacity_mw)}mw_cf{cf_val:.0%}")
 
         return {
             "model_id":             model_id,
-            "project_type":         "solar_ipp",
+            "project_type":         project_type,
             "currency":             "INR",
             "currency_unit":        "Lakhs",
             "periods_per_year":     4,
@@ -263,15 +268,24 @@ class BlueprintAgent:
                 }
             return e
 
-        # --- Generation ---
+        # --- Generation (asset-type specific) ---
         entries.append(_entry("capacity_mw", "scalar", "MW",
                                float(a.get("capacity_mw", 100.0))))
-        entries.append(_entry("cuf", "scalar", "ratio",
-                               float(a.get("cuf", 0.22)),
-                               cmin=0.10, cmax=0.40, vary=True, range_pct=0.10))
-        entries.append(_entry("degradation_rate", "scalar", "per_year",
-                               float(a.get("degradation_rate", 0.005)),
-                               vary=True, range_pct=0.50))
+        if self.asset_type == "wind":
+            cf_default = self._asset_meta["cuf_or_cf_default"]
+            entries.append(_entry("capacity_factor", "scalar", "ratio",
+                                   float(a.get("capacity_factor", cf_default)),
+                                   cmin=0.15, cmax=0.55, vary=True, range_pct=0.10))
+            entries.append(_entry("availability_factor", "scalar", "ratio",
+                                   float(a.get("availability_factor", 0.95)),
+                                   cmin=0.80, cmax=0.99))
+        else:
+            entries.append(_entry("cuf", "scalar", "ratio",
+                                   float(a.get("cuf", 0.22)),
+                                   cmin=0.10, cmax=0.40, vary=True, range_pct=0.10))
+            entries.append(_entry("degradation_rate", "scalar", "per_year",
+                                   float(a.get("degradation_rate", 0.005)),
+                                   vary=True, range_pct=0.50))
         entries.append(_entry("auxiliary_consumption", "scalar", "ratio",
                                float(a.get("auxiliary_consumption", 0.005))))
 
@@ -283,15 +297,17 @@ class BlueprintAgent:
                                float(a.get("tariff_escalation", 0.0))))
 
         # --- Capex ---
+        capex_default = self._asset_meta["capex_per_mw_default"]
         entries.append(_entry("capex_per_mw", "scalar", "INR_Lakhs_per_MW",
-                               float(a.get("capex_per_mw", 450.0)),
+                               float(a.get("capex_per_mw", capex_default)),
                                vary=True, range_pct=0.10))
         schedule = list(a.get("capex_schedule", [0.25, 0.25, 0.25, 0.25]))
         entries.append(_entry("capex_schedule", "time_series", "fraction", schedule))
 
         # --- O&M ---
+        opex_default = self._asset_meta["opex_per_mw_pa_default"]
         entries.append(_entry("opex_per_mw_pa", "scalar", "INR_Lakhs_per_MW_per_year",
-                               float(a.get("opex_per_mw_pa", 8.0)),
+                               float(a.get("opex_per_mw_pa", opex_default)),
                                vary=True, range_pct=0.20))
         entries.append(_entry("opex_escalation", "scalar", "per_year",
                                float(a.get("opex_escalation", 0.03))))
@@ -513,9 +529,12 @@ class BlueprintAgent:
         idc_cap    = float(a.get("idc_capitalised", 0.0))
         idc_str    = "capitalised into debt" if idc_cap >= 0.5 else "equity-funded"
 
+        asset_label = self.asset_type.upper()
+        cf_key  = self._asset_meta["cuf_or_cf_key"]
+        cf_val  = a.get(cf_key, self._asset_meta["cuf_or_cf_default"])
         prompt = (
-            f"Solar IPP configuration to review:\n"
-            f"  Capacity: {capacity} MW, CUF: {float(cuf):.1%}\n"
+            f"{asset_label} IPP configuration to review:\n"
+            f"  Capacity: {capacity} MW, CF/CUF: {float(cf_val):.1%}\n"
             f"  Capex: ₹{capex} Lakh/MW, Tariff: ₹{tariff}/kWh\n"
             f"  Debt: {float(debt_pct)*100:.0f}% at {float(rate)*100:.2f}% p.a., "
             f"{tenor}-yr tenor\n"
@@ -593,67 +612,11 @@ def _slugify(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Fixed wiring (same for all solar IPP models)
+# Wiring — loaded from the template (single source of truth)
 # ---------------------------------------------------------------------------
-# Connections mirror solar_ipp_base.yaml; kept here so BlueprintAgent builds
-# a complete model_dict without reading the template from disk.
 
-_WIRING: Dict[str, Any] = {
-    "connections": [
-        {"from": "generation_block.net_generation_kwh",   "to": "revenue_block.net_generation_kwh"},
-        {"from": "debt_sizing_block.debt_amount",         "to": "debt_drawdown_block.debt_amount"},
-        {"from": "debt_drawdown_block.cumulative_drawdown","to": "idc_block.cumulative_drawdown"},
-        {"from": "debt_sizing_block.debt_amount",         "to": "debt_service_block.debt_amount"},
-        {"from": "revenue_block.revenue",                 "to": "tax_block.revenue"},
-        {"from": "opex_block.total_opex",                 "to": "tax_block.opex"},
-        {"from": "depreciation_block.depreciation",       "to": "tax_block.depreciation"},
-        {"from": "debt_service_block.interest_payment",   "to": "tax_block.interest_payment"},
-        {"from": "revenue_block.revenue",                 "to": "cashflow_block.revenue"},
-        {"from": "opex_block.total_opex",                 "to": "cashflow_block.opex"},
-        {"from": "tax_block.tax",                         "to": "cashflow_block.tax"},
-        {"from": "debt_service_block.total_debt_service", "to": "cashflow_block.total_debt_service"},
-        {"from": "debt_service_block.total_debt_service", "to": "dsra_block.total_debt_service"},
-        {"from": "revenue_block.revenue",                  "to": "waterfall_block.revenue"},
-        {"from": "opex_block.total_opex",                  "to": "waterfall_block.total_opex"},
-        {"from": "tax_block.tax",                          "to": "waterfall_block.tax"},
-        {"from": "debt_service_block.total_debt_service",  "to": "waterfall_block.total_ds"},
-        {"from": "dsra_block.dsra_required",               "to": "waterfall_block.dsra_req"},
-        {"from": "construction_block.capex_drawdown",     "to": "returns_block.capex_drawdown"},
-        {"from": "debt_drawdown_block.drawdown",          "to": "returns_block.debt_drawdown"},
-        {"from": "idc_block.idc_per_period",              "to": "returns_block.idc_per_period"},
-        {"from": "waterfall_block.equity_distribution",   "to": "returns_block.equity_distribution"},
-        {"from": "cashflow_block.cfads",                  "to": "returns_block.cfads"},
-    ],
-    "output_reports": {
-        "income_statement": [
-            "revenue_block.revenue",
-            "opex_block.base_opex",
-            "opex_block.insurance",
-            "opex_block.land_lease",
-            "opex_block.total_opex",
-            "depreciation_block.depreciation",
-            "tax_block.ebitda",
-            "tax_block.ebit",
-            "tax_block.pbt",
-            "tax_block.tax",
-        ],
-        "cash_flow_statement": [
-            "cashflow_block.ebitda",
-            "cashflow_block.capex_during_ops",
-            "cashflow_block.cfads",
-            "cashflow_block.free_cashflow",
-        ],
-        "debt_schedule": [
-            "debt_service_block.outstanding_debt_balance",
-            "debt_service_block.principal_repayment",
-            "debt_service_block.interest_payment",
-            "debt_service_block.total_debt_service",
-            "dsra_block.dsra_required",
-        ],
-        "returns_summary": [
-            "returns_block.equity_invested",
-            "returns_block.equity_cashflow",
-            "returns_block.project_cashflow",
-        ],
-    },
-}
+def _load_wiring() -> Dict[str, Any]:
+    with open(_TEMPLATE_PATH, encoding="utf-8") as fh:
+        return yaml.safe_load(fh)["model_wiring"]
+
+_WIRING: Dict[str, Any] = _load_wiring()

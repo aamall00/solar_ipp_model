@@ -232,8 +232,8 @@ def _write_period_headers(ws, header_row: int, n_periods: int,
 # Sheet: Cover
 # ---------------------------------------------------------------------------
 
-def _sheet_cover(wb: Workbook, results, compiled, scenario_results) -> None:
-    ws = wb.create_sheet("Cover")
+def _sheet_cover(wb: Workbook, results, compiled, scenario_results, sheet_prefix: str = "") -> None:
+    ws = wb.create_sheet(f"{sheet_prefix}Cover")
     ws.sheet_view.showGridLines = False
 
     k   = results.kpis
@@ -557,7 +557,7 @@ def _write_schedule_sheet(
 # Sheet builders
 # ---------------------------------------------------------------------------
 
-def _sheet_income_statement(wb, results, compiled) -> None:
+def _sheet_income_statement(wb, results, compiled, sheet_prefix: str = "") -> None:
     v   = results.variables
     n   = compiled.n_periods
     cod = compiled.cod_period
@@ -602,10 +602,10 @@ def _sheet_income_statement(wb, results, compiled) -> None:
                            np.nan),
          "unit": "%", "fmt": FMT_PCT1, "indent": 1},
     ]
-    _write_schedule_sheet(wb, "Income Statement", sections, compiled, n)
+    _write_schedule_sheet(wb, f"{sheet_prefix}Income Statement", sections, compiled, n)
 
 
-def _sheet_cashflow(wb, results, compiled) -> None:
+def _sheet_cashflow(wb, results, compiled, sheet_prefix: str = "") -> None:
     v   = results.variables
     n   = compiled.n_periods
 
@@ -647,10 +647,10 @@ def _sheet_cashflow(wb, results, compiled) -> None:
         {"type": "row", "label": "IDC  (interest during construction)", "array": _get("idc_block.idc_per_period"),  "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Cumulative Capex",        "array": _get("construction_block.cumulative_capex"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS},
     ]
-    _write_schedule_sheet(wb, "Cash Flow", sections, compiled, n)
+    _write_schedule_sheet(wb, f"{sheet_prefix}Cash Flow", sections, compiled, n)
 
 
-def _sheet_debt_schedule(wb, results, compiled) -> None:
+def _sheet_debt_schedule(wb, results, compiled, sheet_prefix: str = "") -> None:
     v   = results.variables
     n   = compiled.n_periods
 
@@ -686,10 +686,10 @@ def _sheet_debt_schedule(wb, results, compiled) -> None:
         {"type": "row", "label": "DSRA Required",       "array": _get("dsra_block.dsra_required"),            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "DSRA Funding",        "array": _get("waterfall_block.dsra_funding"),        "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
     ]
-    _write_schedule_sheet(wb, "Debt Schedule", sections, compiled, n)
+    _write_schedule_sheet(wb, f"{sheet_prefix}Debt Schedule", sections, compiled, n)
 
 
-def _sheet_generation(wb, results, compiled) -> None:
+def _sheet_generation(wb, results, compiled, sheet_prefix: str = "") -> None:
     v   = results.variables
     n   = compiled.n_periods
     asmp = results.assumptions_used
@@ -715,10 +715,10 @@ def _sheet_generation(wb, results, compiled) -> None:
         {"type": "row", "label": "Depreciable Asset Base",  "array": _get("depreciation_block.depreciable_asset_base"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Depreciation Charge",     "array": _get("depreciation_block.depreciation"),           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
     ]
-    _write_schedule_sheet(wb, "Generation & Revenue", sections, compiled, n)
+    _write_schedule_sheet(wb, f"{sheet_prefix}Generation & Revenue", sections, compiled, n)
 
 
-def _sheet_waterfall(wb, results, compiled) -> None:
+def _sheet_waterfall(wb, results, compiled, sheet_prefix: str = "") -> None:
     v   = results.variables
     n   = compiled.n_periods
 
@@ -754,7 +754,7 @@ def _sheet_waterfall(wb, results, compiled) -> None:
         {"type": "row", "label": "Total Allocated",                "array": total_out, "unit": "INR Lakhs", "fmt": FMT_LAKHS},
         {"type": "row", "label": "Check  (Revenue − Allocated)",   "array": rev - total_out, "unit": "INR Lakhs", "fmt": FMT_LAKHS},
     ]
-    _write_schedule_sheet(wb, "Waterfall", sections, compiled, n)
+    _write_schedule_sheet(wb, f"{sheet_prefix}Waterfall", sections, compiled, n)
 
 
 def _sheet_sensitivity(wb, sensitivity_results) -> None:
@@ -963,8 +963,8 @@ def _sheet_monte_carlo(wb, mc_results) -> None:
         ws.column_dimensions[col].width = 20
 
 
-def _sheet_assumptions(wb, results, compiled) -> None:
-    ws = wb.create_sheet("Assumptions")
+def _sheet_assumptions(wb, results, compiled, sheet_prefix: str = "") -> None:
+    ws = wb.create_sheet(f"{sheet_prefix}Assumptions")
     ws.sheet_view.showGridLines = False
 
     ws.merge_cells("A1:D1")
@@ -1137,3 +1137,122 @@ def export_to_excel(
 
     wb.save(path)
     return path
+
+
+def export_portfolio_to_excel(
+    asset_results,
+    path: str | Path = "portfolio_output.xlsx",
+) -> Path:
+    """
+    Export a list of AssetResult objects to a single Excel workbook.
+
+    Sheet layout
+    ------------
+    Portfolio Summary  — KPIs for all assets side by side
+    [SPV-1] Cover      — project summary for asset 1
+    [SPV-1] Income Statement
+    [SPV-1] Cash Flow
+    [SPV-1] Debt Schedule
+    [SPV-1] Generation & Revenue
+    [SPV-1] Waterfall
+    [SPV-1] Assumptions
+    [SPV-2] Cover      — project summary for asset 2
+    ... (repeated for each asset)
+
+    Parameters
+    ----------
+    asset_results : List[AssetResult] from PortfolioRunner.run()
+    path          : Output file path.
+
+    Returns
+    -------
+    Path to the written file.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    wb = Workbook()
+    wb.remove(wb.active)
+
+    # ---- Portfolio summary sheet ----
+    _sheet_portfolio_summary(wb, asset_results)
+
+    # ---- Per-asset sheets ----
+    for ar in asset_results:
+        # Excel sheet names cannot contain [ ] * ? : / \  — use parentheses instead
+        safe_spv = ar.spec.spv_name.replace("[", "(").replace("]", ")")
+        prefix = f"({safe_spv}) "
+        _sheet_cover(wb, ar.model_results, ar.compiled, None, sheet_prefix=prefix)
+        _sheet_income_statement(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_cashflow(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_debt_schedule(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_generation(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_waterfall(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_assumptions(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+
+    wb.save(path)
+    return path
+
+
+def _sheet_portfolio_summary(wb: Workbook, asset_results) -> None:
+    """
+    Write a side-by-side KPI summary for all assets in the portfolio.
+    One column per asset.
+    """
+    ws = wb.create_sheet("Portfolio Summary")
+    ws.sheet_view.showGridLines = False
+
+    # Title
+    n_assets = len(asset_results)
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=2 + n_assets)
+    c = ws.cell(row=1, column=1, value="PORTFOLIO SUMMARY  —  ALL ASSETS")
+    c.font  = _font(bold=True, size=14, color="FFFFFF")
+    c.fill  = _fill(C_HEADER_DARK)
+    c.alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 32
+
+    # Asset headers (row 2)
+    ws.cell(row=2, column=1, value="KPI").font = _font(bold=True, size=10)
+    ws.cell(row=2, column=2, value="Unit").font = _font(bold=True, size=10)
+    for i, ar in enumerate(asset_results, start=3):
+        c = ws.cell(row=2, column=i, value=ar.spec.name)
+        c.font      = _font(bold=True, size=10, color="FFFFFF")
+        c.fill      = _fill(C_HEADER_MID)
+        c.alignment = Alignment(horizontal="center")
+
+    # KPI rows
+    kpi_rows = [
+        ("Asset Type",         "",     lambda ar: ar.spec.asset_type.title()),
+        ("SPV Name",           "",     lambda ar: ar.spec.spv_name),
+        ("Capacity",           "MW",   lambda ar: ar.model_results.kpis.capacity_mw if hasattr(ar.model_results.kpis, "capacity_mw") else ar.model_results.assumptions_used.get("capacity_mw", "—")),
+        ("Equity IRR",         "%",    lambda ar: f"{ar.model_results.kpis.equity_irr * 100:.2f}%" if ar.model_results.kpis.equity_irr else "n/a"),
+        ("Project IRR",        "%",    lambda ar: f"{ar.model_results.kpis.project_irr * 100:.2f}%" if ar.model_results.kpis.project_irr else "n/a"),
+        ("Min DSCR",           "×",    lambda ar: f"{ar.model_results.kpis.min_dscr:.3f}×" if ar.model_results.kpis.min_dscr else "n/a"),
+        ("Avg DSCR",           "×",    lambda ar: f"{ar.model_results.kpis.avg_dscr:.3f}×" if ar.model_results.kpis.avg_dscr else "n/a"),
+        ("LLCR",               "×",    lambda ar: f"{ar.model_results.kpis.llcr:.3f}×" if ar.model_results.kpis.llcr else "n/a"),
+        ("Debt Amount",        "₹ Lk", lambda ar: f"{ar.model_results.kpis.total_debt_amount:,.0f}" if ar.model_results.kpis.total_debt_amount else "n/a"),
+        ("Total Capex",        "₹ Lk", lambda ar: f"{ar.model_results.assumptions_used.get('capex_per_mw', 0) * ar.model_results.assumptions_used.get('capacity_mw', 0):,.0f}"),
+    ]
+
+    for row_i, (label, unit, getter) in enumerate(kpi_rows, start=3):
+        ws.cell(row=row_i, column=1, value=label).font = _font(size=10)
+        ws.cell(row=row_i, column=2, value=unit).font  = _font(size=10, italic=True)
+        if row_i % 2 == 0:
+            ws.cell(row=row_i, column=1).fill = _fill(C_SECTION_ALT)
+            ws.cell(row=row_i, column=2).fill = _fill(C_SECTION_ALT)
+        for col_i, ar in enumerate(asset_results, start=3):
+            try:
+                val = getter(ar)
+            except Exception:
+                val = "n/a"
+            cell = ws.cell(row=row_i, column=col_i, value=val)
+            cell.font      = _font(size=10)
+            cell.alignment = Alignment(horizontal="center")
+            if row_i % 2 == 0:
+                cell.fill = _fill(C_SECTION_ALT)
+
+    # Column widths
+    ws.column_dimensions["A"].width = 24
+    ws.column_dimensions["B"].width = 10
+    for i in range(n_assets):
+        ws.column_dimensions[get_column_letter(3 + i)].width = 20

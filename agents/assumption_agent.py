@@ -349,6 +349,86 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
 _REQUIRED_ASSUMPTIONS = [k for k, v in _CANONICAL.items() if v["default"] is None]
 
 # ---------------------------------------------------------------------------
+# Wind IPP canonical assumption schema
+# ---------------------------------------------------------------------------
+# Replaces cuf + degradation_rate with capacity_factor + availability_factor.
+# All financial assumptions (debt, opex, tax, etc.) are shared with solar.
+
+_WIND_CANONICAL: Dict[str, Dict[str, Any]] = {
+    # ---- Generation (wind-specific) ----
+    "capacity_mw": _CANONICAL["capacity_mw"],
+    "capacity_factor": {
+        "type": "scalar", "unit": "ratio (decimal)",
+        "default": 0.30,
+        "aliases": ["cf", "wind_cf", "wind_capacity_factor", "annual_yield",
+                    "plant_load_factor", "plf", "cuf"],
+        "constraints": {"min": 0.15, "max": 0.55},
+        "sensitivity": {"vary": True, "range_pct": 0.10, "distribution": "triangular"},
+        "description": "P50 annual capacity factor as a decimal (e.g. 0.30 for 30%)",
+    },
+    "availability_factor": {
+        "type": "scalar", "unit": "ratio (decimal)",
+        "default": 0.95,
+        "aliases": ["turbine_availability", "machine_availability", "availability",
+                    "pa", "plant_availability"],
+        "constraints": {"min": 0.80, "max": 0.99},
+        "description": "Annual turbine availability factor as a decimal (e.g. 0.95 for 95%)",
+    },
+    "auxiliary_consumption": _CANONICAL["auxiliary_consumption"],
+    # ---- Revenue ----
+    "tariff":             _CANONICAL["tariff"],
+    "tariff_escalation":  _CANONICAL["tariff_escalation"],
+    "ppa_tenor_years":    _CANONICAL["ppa_tenor_years"],
+    # ---- Capex (wind defaults differ) ----
+    "capex_per_mw": {
+        **_CANONICAL["capex_per_mw"],
+        "default": 700.0,
+        "constraints": {"min": 300.0, "max": 1500.0},
+        "description": "Total project capex per MW in INR Lakhs/MW (wind: typically 600–900 Lakh/MW)",
+    },
+    "capex_schedule": _CANONICAL["capex_schedule"],
+    # ---- O&M (wind defaults differ) ----
+    "opex_per_mw_pa": {
+        **_CANONICAL["opex_per_mw_pa"],
+        "default": 20.0,
+        "description": "Annual O&M cost per MW in INR Lakhs (wind: typically 15–30 Lakh/MW/yr)",
+    },
+    "opex_escalation":          _CANONICAL["opex_escalation"],
+    # ---- Debt ----
+    "debt_pct":                 _CANONICAL["debt_pct"],
+    "interest_rate":            _CANONICAL["interest_rate"],
+    "debt_tenor_years":         _CANONICAL["debt_tenor_years"],
+    "moratorium_periods":       _CANONICAL["moratorium_periods"],
+    "dscr_target":              _CANONICAL["dscr_target"],
+    "debt_sizing_mode":         _CANONICAL["debt_sizing_mode"],
+    "dsra_months":              _CANONICAL["dsra_months"],
+    "cash_sweep_rate":          _CANONICAL["cash_sweep_rate"],
+    # ---- Tax & Depreciation ----
+    "tax_rate":                 _CANONICAL["tax_rate"],
+    "depreciation_rate":        _CANONICAL["depreciation_rate"],
+    # ---- O&M sub-components ----
+    "insurance_percent_of_capex": _CANONICAL["insurance_percent_of_capex"],
+    "land_lease_lakhs_pa":        _CANONICAL["land_lease_lakhs_pa"],
+    "maintenance_capex_pct":      _CANONICAL["maintenance_capex_pct"],
+    # ---- Depreciation method ----
+    "depreciation_method":      _CANONICAL["depreciation_method"],
+    "wdv_rate":                 _CANONICAL["wdv_rate"],
+    "use_wdv":                  _CANONICAL["use_wdv"],
+    # ---- IDC capitalisation ----
+    "idc_capitalised":          _CANONICAL["idc_capitalised"],
+    # ---- Equity ----
+    "equity_irr_target":        _CANONICAL["equity_irr_target"],
+}
+
+_WIND_REQUIRED_ASSUMPTIONS = [k for k, v in _WIND_CANONICAL.items() if v["default"] is None]
+
+# Map asset_type → (canonical dict, required list)
+_SCHEMA_BY_ASSET: Dict[str, tuple] = {
+    "solar": (_CANONICAL, _REQUIRED_ASSUMPTIONS),
+    "wind":  (_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS),
+}
+
+# ---------------------------------------------------------------------------
 # Assumption contract — the explicit bridge between Layer 3 and Layer 4
 # ---------------------------------------------------------------------------
 #
@@ -423,48 +503,6 @@ class IngestionResult:
     validation: ValidationResult
 
 
-# ---------------------------------------------------------------------------
-# Tool definitions (passed to Claude)
-# ---------------------------------------------------------------------------
-
-def _build_set_assumptions_tool() -> Dict[str, Any]:
-    """Build the set_assumptions tool schema from the canonical assumption dict."""
-    properties: Dict[str, Any] = {}
-    for name, meta in _CANONICAL.items():
-        prop: Dict[str, Any] = {
-            "description": (
-                f"{meta['description']}  "
-                f"[unit: {meta['unit']}]  "
-                f"[aliases: {', '.join(meta.get('aliases', [])[:4])}]"
-            )
-        }
-        if meta["type"] == "schedule":
-            prop["type"] = "array"
-            prop["items"] = {"type": "number"}
-        elif meta["type"] == "enum":
-            prop["type"] = "string"
-            enum_vals = meta.get("enum_values", [])
-            if enum_vals:
-                prop["enum"] = enum_vals
-        else:
-            prop["type"] = "number"
-        properties[name] = prop
-
-    return {
-        "name": "set_assumptions",
-        "description": (
-            "Record the solar IPP assumption values you have identified in the user's text. "
-            "Include every assumption you can determine, either explicitly stated or "
-            "reasonably calculable.  Omit assumptions you genuinely cannot determine — "
-            "defaults will be applied for those.  Do NOT invent values; if uncertain, omit."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": properties,
-        },
-    }
-
-
 _NOTE_INFERENCES_TOOL: Dict[str, Any] = {
     "name": "note_inferences",
     "description": (
@@ -532,22 +570,31 @@ Rules:
 
 class AssumptionAgent:
     """
-    Extracts, validates, and defaults solar IPP assumptions from free-form text.
+    Extracts, validates, and defaults IPP assumptions from free-form text.
 
     Parameters
     ----------
-    model  : Anthropic model name.
-    client : Pre-configured anthropic.Anthropic client (uses env var if None).
+    asset_type : "solar" (default) or "wind" — selects the canonical schema.
+    model      : Anthropic model name.
+    client     : Pre-configured anthropic.Anthropic client (uses env var if None).
     """
 
     def __init__(
         self,
+        asset_type: str = "solar",
         model: str = "claude-sonnet-4-6",
         client: Optional[anthropic.Anthropic] = None,
     ) -> None:
+        self.asset_type = asset_type.lower().strip()
+        if self.asset_type not in _SCHEMA_BY_ASSET:
+            raise ValueError(
+                f"Unknown asset_type '{asset_type}'. "
+                f"Supported: {sorted(_SCHEMA_BY_ASSET.keys())}"
+            )
+        self._canonical, self._required = _SCHEMA_BY_ASSET[self.asset_type]
         self.model = model
         self.client = client or anthropic.Anthropic()
-        self._set_tool = _build_set_assumptions_tool()
+        self._set_tool = self._build_tool()
 
     # ------------------------------------------------------------------
     # Public API
@@ -577,12 +624,46 @@ class AssumptionAgent:
         )
 
     def assumption_names(self) -> List[str]:
-        """Return all canonical assumption names."""
-        return list(_CANONICAL.keys())
+        """Return all canonical assumption names for this asset type."""
+        return list(self._canonical.keys())
 
     def required_names(self) -> List[str]:
         """Return assumption names that have no default and must be supplied."""
-        return list(_REQUIRED_ASSUMPTIONS)
+        return list(self._required)
+
+    def _build_tool(self) -> Dict[str, Any]:
+        """Build the set_assumptions tool schema from this agent's canonical dict."""
+        properties: Dict[str, Any] = {}
+        for name, meta in self._canonical.items():
+            prop: Dict[str, Any] = {
+                "description": (
+                    f"{meta['description']}  "
+                    f"[unit: {meta['unit']}]  "
+                    f"[aliases: {', '.join(meta.get('aliases', [])[:4])}]"
+                )
+            }
+            if meta["type"] == "schedule":
+                prop["type"] = "array"
+                prop["items"] = {"type": "number"}
+            elif meta["type"] == "enum":
+                prop["type"] = "string"
+                enum_vals = meta.get("enum_values", [])
+                if enum_vals:
+                    prop["enum"] = enum_vals
+            else:
+                prop["type"] = "number"
+            properties[name] = prop
+
+        asset_label = self.asset_type.upper().replace("_", " ")
+        return {
+            "name": "set_assumptions",
+            "description": (
+                f"Record the {asset_label} IPP assumption values identified in the user's text. "
+                "Include every assumption you can determine. Omit assumptions you cannot determine — "
+                "defaults will be applied.  Do NOT invent values; if uncertain, omit."
+            ),
+            "input_schema": {"type": "object", "properties": properties},
+        }
 
     # ------------------------------------------------------------------
     # Private: Claude extraction
@@ -616,12 +697,12 @@ class AssumptionAgent:
                 continue
             if block.name == "set_assumptions":
                 for k, v in block.input.items():
-                    if k in _CANONICAL:
+                    if k in self._canonical:
                         explicit[k] = v
             elif block.name == "note_inferences":
                 for entry in block.input.get("inferences", []):
                     name = entry.get("assumption", "")
-                    if name in _CANONICAL:
+                    if name in self._canonical:
                         inferred[name] = InferredAssumption(
                             value=entry["value"],
                             derivation_note=entry["derivation_note"],
@@ -642,7 +723,7 @@ class AssumptionAgent:
         filled = dict(extracted)
         missing: List[str] = []
 
-        for name, meta in _CANONICAL.items():
+        for name, meta in self._canonical.items():
             if name in filled:
                 continue
             if meta["default"] is not None:
@@ -692,7 +773,7 @@ class AssumptionAgent:
         vr = ValidationResult(valid=True)
 
         # --- Constraint bounds ---
-        for name, meta in _CANONICAL.items():
+        for name, meta in self._canonical.items():
             if name not in assumptions:
                 continue
             val = assumptions[name]

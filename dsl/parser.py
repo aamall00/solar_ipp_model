@@ -91,7 +91,28 @@ class DSLParser:
             raise DSLParseError(f"YAML parse error in '{path}': {exc}") from exc
         if not isinstance(raw, dict):
             raise DSLParseError(f"Top-level YAML must be a mapping, got {type(raw).__name__}")
+
+        # Resolve import_from directive: replace with blocks loaded from the library
+        calc = raw.get("calculation_blocks", {})
+        if isinstance(calc, dict) and "import_from" in calc:
+            import_key = calc.pop("import_from")
+            calc["blocks"] = self._resolve_block_import(import_key)
+
         return self.load_dict(raw)
+
+    @staticmethod
+    def _resolve_block_import(import_key: str) -> List[Dict[str, Any]]:
+        """Resolve an import_from key to an ordered list of raw block dicts."""
+        if import_key == "solar_ipp":
+            from blocks.solar_ipp import load_all_blocks_raw
+            return list(load_all_blocks_raw().values())
+        if import_key == "wind_ipp":
+            from blocks.wind_ipp import load_all_blocks_raw
+            return list(load_all_blocks_raw().values())
+        raise DSLParseError(
+            f"Unknown block library '{import_key}' in import_from. "
+            f"Valid values: 'solar_ipp', 'wind_ipp'"
+        )
 
     def load_dict(
         self, data: Dict[str, Any]

@@ -62,6 +62,8 @@ outputs:
     unit: INR_Lakhs
   - name: equity_distribution
     unit: INR_Lakhs
+  - name: equity_infusion
+    unit: INR_Lakhs
 
 buckets:
   # Priority 1: Operating costs and taxes — must be paid before any debt service

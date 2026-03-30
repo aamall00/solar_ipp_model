@@ -286,12 +286,90 @@ def run_monte_carlo(executor: ModelExecutor, compiled, n_iterations: int = 1000)
 
 
 # ---------------------------------------------------------------------------
+# Portfolio runner (--portfolio mode)
+# ---------------------------------------------------------------------------
+
+def _run_portfolio(args) -> None:
+    """Interactive multi-asset portfolio mode."""
+    from agents.portfolio_agent import PortfolioAgent
+    from engine.portfolio_runner import PortfolioRunner
+    from engine.excel_exporter import export_portfolio_to_excel
+
+    print()
+    print(_SEP)
+    print("  IPP PORTFOLIO FINANCIAL MODEL")
+    print(_SEP)
+    print()
+    print("  Describe your portfolio of assets.")
+    print("  Example: 'Two assets in different SPVs — 100 MW solar in SPV-A")
+    print("            at ₹2.65/kWh, 70% debt, and 50 MW wind in SPV-B at ₹3.20/kWh.'")
+    print()
+    portfolio_prompt = input("  Portfolio description: ").strip()
+    if not portfolio_prompt:
+        print("  No input provided. Exiting.")
+        return
+
+    print()
+    print("  Parsing portfolio...")
+    port_agent = PortfolioAgent()
+    specs = port_agent.parse(portfolio_prompt)
+
+    print(f"  Identified {len(specs)} asset(s):")
+    for s in specs:
+        print(f"    • {s.name}  [{s.asset_type}]  SPV: {s.spv_name}")
+
+    print()
+
+    def _prompt_fn(spec):
+        print(f"\n  --- Assumptions for {spec.name} ({spec.asset_type.upper()}) ---")
+        print(f"  Extracted from portfolio description: \"{spec.description}\"")
+        print("  Add or override any details below (press Enter to use as-is):")
+        extra = input("  Additional details: ").strip()
+        return spec.description + (" " + extra if extra else "")
+
+    ingestions = port_agent.collect_assumptions(specs, prompt_fn=_prompt_fn)
+
+    print()
+    print("  Running financial models...")
+    runner  = PortfolioRunner()
+    results = runner.run(ingestions)
+
+    print()
+    print(_SEP)
+    for ar in results:
+        k = ar.model_results.kpis
+        print(f"  {ar.spec.name}  [{ar.spec.asset_type.upper()}]")
+        irr_str  = f"{k.equity_irr * 100:.2f}%" if k.equity_irr  else "n/a"
+        dscr_str = f"{k.min_dscr:.3f}×"         if k.min_dscr   else "n/a"
+        print(f"    Equity IRR : {irr_str}")
+        print(f"    Min DSCR   : {dscr_str}")
+        if ar.validation.warnings:
+            for w in ar.validation.warnings:
+                print(f"    ~ {w.message}")
+        print()
+
+    export_path = args.export or "output/portfolio.xlsx"
+    out = export_portfolio_to_excel(results, path=export_path)
+    print(_SEP)
+    print(f"  Portfolio Excel written to: {out}")
+    print(_SEP)
+    print()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Solar IPP financial model runner (Karnataka 100 MW baseline)"
+        description="IPP project finance model runner"
+    )
+    parser.add_argument(
+        "--portfolio", action="store_true",
+        help=(
+            "Portfolio mode: describe multiple assets interactively and export "
+            "one Excel workbook with grouped sheets per asset/SPV."
+        )
     )
     parser.add_argument(
         "--monte-carlo", action="store_true",
@@ -316,6 +394,13 @@ def main() -> None:
         help="Include full audit trail sheet in Excel export (large file)"
     )
     args = parser.parse_args()
+
+    # -----------------------------------------------------------------------
+    # Portfolio mode
+    # -----------------------------------------------------------------------
+    if args.portfolio:
+        _run_portfolio(args)
+        return
 
     template_path = Path(args.template)
     if not template_path.exists():
