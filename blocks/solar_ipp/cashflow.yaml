@@ -1,50 +1,50 @@
 # Cashflow Block — Standard 3-section Cash Flow Statement
 #
-# Structures cashflows into the three standard sections to provide a complete
-# free cashflow template.  The block absorbs the former returns_block, which
-# is deleted; all KPI-layer naming conventions are preserved.
+# FCFE = CFO + CFI + CFF  where CFF contains debt flows only.
+# Equity distributions and equity infusions are covenant / waterfall mechanics;
+# they are excluded from this statement to keep the three sections clean.
 #
 # ── SECTION 1: Cash Flow from Operations (CFO) ──────────────────────────────
 #   CFO = EBITDA − Tax − capex_during_ops
-#   CFO subtotal: cfads  (Cash Flow Available for Debt Service)
+#   Subtotal: cfads  (Cash Flow Available for Debt Service)
 #
-#   CFADS is computed BEFORE debt service so the sculpting solver can use it
-#   to size the debt service schedule.  Tax is initially computed with
-#   interest = 0 (debt_service_block initialises to zero), so CFADS is slightly
-#   overstated before sculpting.  This one-pass approximation is standard
-#   practice for bankability screening models.
+#   CFADS is computed before debt service so the sculpting solver can size the
+#   repayment schedule.  Tax is initially computed with interest = 0, so CFADS
+#   is slightly overstated before sculpting — standard bankability practice.
 #
-#   capex_during_ops: quarterly maintenance capital expenditure during operations.
-#     = total_project_capex × maintenance_capex_pct / 4, active only during ops.
+#   capex_during_ops: quarterly maintenance capex during operations.
+#     = total_project_capex × maintenance_capex_pct / 4.
 #     Default maintenance_capex_pct = 0.0 so legacy runs are unaffected.
 #
 # ── SECTION 2: Cash Flow from Investing (CFI) ────────────────────────────────
-#   CFI = −capex_drawdown  (construction capex outflow)
-#   Note: maintenance capex (capex_during_ops) is already deducted in CFO.
+#   CFI = −capex_drawdown  (construction hard-capex outflow only)
+#   Maintenance capex is already deducted inside CFO (reduces cfads).
 #
 #   project_cashflow (FCFF = CFO + CFI, ungeared):
 #     project_cashflow = cfads × is_operational − capex_drawdown × is_construction
-#   Excludes all financing cash flows → pure project economic return.
+#   Pure project return independent of financing structure.
 #   Used by the KPI layer for project IRR and NPV.
 #
-# ── SECTION 3: Cash Flow from Financing (CFF) ────────────────────────────────
-#   Inflows / outflows sourced from debt_service_block and waterfall_block;
-#   not recomputed here.
+# ── SECTION 3: Cash Flow from Financing (CFF — debt only) ────────────────────
+#   Inflows:  debt_drawdown during construction  (lender disburses)
+#   Outflows: total_debt_service during operations  (principal + interest repaid)
 #
-#   equity_invested: equity's share of construction capex (debt covers the rest).
+#   net_debt_cashflow (CFF subtotal):
+#     = debt_drawdown × is_construction − total_debt_service × is_operational
+#
+#   equity_invested: equity's share of construction capex.
 #     = −(capex_drawdown − debt_drawdown) × is_construction
 #     Debt drawdown includes capitalised IDC; equity pays only the residual.
 #
-#   free_cashflow: post-debt-service cashflow.
+#   free_cashflow: post-debt-service operating cashflow.
 #     = cfads − total_debt_service
 #
-#   equity_cashflow (FCFE): total equity cashflow across the project life.
-#     Construction: equity cash outflows for capex not covered by debt.
-#     Operations:   distributions received minus any cash calls (equity_top_up).
-#     = equity_invested + equity_distribution − equity_top_up × is_operational
+#   equity_cashflow (FCFE = CFO + CFI + CFF):
+#     = project_cashflow + net_debt_cashflow
+#     = equity_invested + free_cashflow × is_operational
 #   Used by the KPI layer for equity IRR and payback period.
 #
-# Naming conventions used by the executor (unchanged from prior blocks):
+# Naming conventions used by the executor (unchanged):
 #   cashflow_block.cfads            → sculpting solver, DSCR computation, KPI CFADS
 #   cashflow_block.equity_cashflow  → equity IRR, payback
 #   cashflow_block.project_cashflow → project IRR, NPV
@@ -52,7 +52,7 @@
 block_id: cashflow_block
 category: cashflow
 block_type: standard
-description: "CFO/CFI/CFF cashflow statement; CFADS for sculpting solver; equity and project cashflows for IRR/NPV"
+description: "CFO/CFI/CFF(debt-only) cashflow statement; CFADS for sculpting solver; FCFF and FCFE for IRR/NPV"
 
 inputs:
   # ── CFO inputs ──────────────────────────────────────────────────────────────
@@ -73,15 +73,11 @@ inputs:
   - name: is_construction
     source: phase.is_construction
 
-  # ── CFF inputs ──────────────────────────────────────────────────────────────
+  # ── CFF inputs (debt only) ───────────────────────────────────────────────────
   - name: total_debt_service
     source: debt_service_block.total_debt_service
   - name: debt_drawdown
     source: debt_service_block.drawdown
-  - name: equity_distribution
-    source: waterfall_block.equity_distribution
-  - name: equity_top_up
-    source: waterfall_block.equity_infusion
 
 outputs:
   # CFO
@@ -95,6 +91,8 @@ outputs:
   - name: project_cashflow
     unit: INR_Lakhs
   # CFF
+  - name: net_debt_cashflow
+    unit: INR_Lakhs
   - name: equity_invested
     unit: INR_Lakhs
   - name: free_cashflow
@@ -124,11 +122,16 @@ body:
   # Project cashflow (FCFF = CFO + CFI, ungeared):
   #   Construction: total hard-capex outflow (negative)
   #   Operations:   CFADS (pre-debt-service free cashflow, positive)
-  # Financing structure is excluded → pure project economic return.
   - target: project_cashflow
     expr: "capex_drawdown * is_construction * -1.0 + cfads * is_operational"
 
-  # ── SECTION 3: Cash Flow from Financing (CFF) ────────────────────────────────
+  # ── SECTION 3: Cash Flow from Financing (CFF — debt only) ────────────────────
+
+  # Net debt cashflow (CFF subtotal):
+  #   Construction: debt disbursed by lender (positive inflow)
+  #   Operations:   principal + interest repaid to lender (negative outflow)
+  - target: net_debt_cashflow
+    expr: "debt_drawdown * is_construction - total_debt_service * is_operational"
 
   # Equity invested during construction: hard capex not covered by debt drawdown.
   # Debt drawdown includes capitalised IDC; equity covers only the residual fraction.
@@ -140,8 +143,10 @@ body:
   - target: free_cashflow
     expr: "cfads - total_debt_service"
 
-  # Equity cashflow (FCFE): total equity perspective across the project life.
-  #   Construction: equity cash outflows for capex not covered by debt
-  #   Operations:   distributions received minus any cash calls (equity_top_up)
+  # Equity cashflow (FCFE = CFO + CFI + CFF = FCFF + net_debt_cashflow):
+  #   = project_cashflow + net_debt_cashflow
+  #   = equity_invested + free_cashflow × is_operational
+  #   Construction: equity cash outflow for capex not covered by debt
+  #   Operations:   post-debt-service free cashflow (pre-waterfall distribution)
   - target: equity_cashflow
-    expr: "equity_invested + equity_distribution - equity_top_up * is_operational"
+    expr: "equity_invested + free_cashflow * is_operational"

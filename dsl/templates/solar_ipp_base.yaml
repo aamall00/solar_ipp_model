@@ -408,13 +408,9 @@ model_wiring:
     - from: dsra_block.dsra_required
       to: waterfall_block.dsra_req
 
-    # Cashflow CFF inputs (from debt service and waterfall)
+    # Cashflow CFF input (debt drawdown for equity_invested and net_debt_cashflow)
     - from: debt_service_block.drawdown
       to: cashflow_block.debt_drawdown
-    - from: waterfall_block.equity_distribution
-      to: cashflow_block.equity_distribution
-    - from: waterfall_block.equity_infusion
-      to: cashflow_block.equity_top_up
 
   output_reports:
     income_statement:
@@ -442,6 +438,7 @@ model_wiring:
       - cashflow_block.capex_during_ops
       - cashflow_block.cfads
       - cashflow_block.project_cashflow
+      - cashflow_block.net_debt_cashflow
       - cashflow_block.equity_invested
       - cashflow_block.free_cashflow
       - cashflow_block.equity_cashflow
@@ -459,6 +456,6 @@ model_wiring:
 
     returns_summary:
       - cashflow_block.equity_invested
-      - waterfall_block.equity_infusion
+      - cashflow_block.net_debt_cashflow
       - cashflow_block.equity_cashflow
       - cashflow_block.project_cashflow

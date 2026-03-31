@@ -11,12 +11,6 @@
 #   4. cash_sweep          — optional excess-cash sweep to accelerate debt prepayment
 #   5. equity_distribution — residual to equity holders (auto-computed as waterfall residual)
 #
-# equity_infusion:
-#   When revenue is insufficient to cover priority-1 + priority-2 obligations, equity
-#   must inject cash to make up the shortfall.  Computed explicitly as:
-#     equity_infusion[t] = max(0, total_opex + tax + total_ds − revenue)[t] × is_operational
-#   This ensures cashflow_block.equity_cashflow correctly accounts for cash calls.
-#
 # Cash sweep logic:
 #   cash_sweep[t] = (remaining_after_dsra[t]) × cash_sweep_rate × is_debt_outstanding[t]
 #   cash_sweep_rate = 0.0 (default) → all residual flows to equity immediately.
@@ -67,8 +61,6 @@ outputs:
     unit: INR_Lakhs
   - name: equity_distribution
     unit: INR_Lakhs
-  - name: equity_infusion
-    unit: INR_Lakhs
 
 buckets:
   # Priority 1: Operating costs and taxes — must be paid before any debt service
@@ -100,8 +92,4 @@ buckets:
   # Priority 5: Equity distribution — implicit residual (executor stores automatically
   # after all buckets are processed)
 
-body:
-  # Equity infusion: cash shortfall that equity must cover when revenue < obligations.
-  # Floored at zero (positive means equity injects cash; zero means self-funding).
-  - target: equity_infusion
-    expr: "max_series(total_opex + tax + total_ds - revenue, scalar_to_series(0.0)) * is_operational"
+
