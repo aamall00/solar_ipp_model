@@ -202,6 +202,14 @@ assumption_schema:
       unit: quarters
       value: 0.0
 
+    - name: debt_repayment_periods
+      type: scalar
+      unit: quarters
+      value: 60.0
+      constraints:
+        min: 4.0
+        max: 100.0
+
     - name: dscr_target
       type: scalar
       unit: ratio
@@ -281,21 +289,6 @@ assumption_schema:
         min: 0.0
         max: 1.0
 
-    # --- IDC capitalisation ---
-    # idc_capitalised: 0.0 = IDC equity-funded (default)
-    #                  1.0 = IDC capitalised into debt base (requires goal_seek loop)
-    - name: idc_capitalised
-      type: scalar
-      unit: flag
-      value: 0.0
-
-    # idc_supplement: solved by goal_seek loop when idc_capitalised=1;
-    # always 0.0 as starting value (and permanent value when not capitalising)
-    - name: idc_supplement
-      type: scalar
-      unit: INR_Lakhs
-      value: 0.0
-
     # --- Returns ---
     - name: equity_irr_target
       type: scalar
@@ -315,29 +308,24 @@ calculation_blocks:
   # Solve Loops
   # ------------------------------------------------------------------
   solve_loops:
-    # IDC capitalisation loop — runs BEFORE sculpting (assumption free_variable = prepended).
-    # When idc_capitalised=1: executor _run_idc_forward_march solves the circular reference
-    # (IDC depends on closing debt which depends on IDC) analytically in one forward pass.
-    # When idc_capitalised=0: _run_idc_forward_march is a no-op; subgraph runs normally
-    # with idc_supplement=0 and the standard lag(cumulative_drawdown,1) YAML formula.
+    # IDC capitalisation loop — resolves the circular dependency between debt drawdown and IDC:
+    #   debt_service_block draws debt_pct × (hard_capex[t] + idc[t]) each period
+    #   idc_block computes idc_per_period from cumulative_drawdown (average-balance)
+    #   idc_block.idc_per_period feeds back to debt_service_block → circular
+    #
+    # The generic array_fixed_point solver re-evaluates owned_blocks in declared
+    # order each iteration. Convergence: max(|idc_per_period_new - old|) < tolerance.
+    # Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085 → ~3–5 iterations.
+    # debt_service_block runs in full each iteration (drawdown + sizing + service).
     - loop_id: idc_capitalisation
-      type: idc_forward_march
-      free_variable: assumption.idc_supplement
-      target_expression: "idc_block.idc_total - assumption.idc_supplement"
+      type: array_fixed_point
+      free_variable: idc_block.idc_per_period
+      target_expression: "idc_block.idc_per_period"
       target_value: 0.0
-
-    - loop_id: debt_service_sculpting
-      type: sculpting
-      # free_variable: the block whose outputs are replaced by the sculpting solver.
-      # Executor convention: target_block_id = free_variable.split(".")[0]
-      free_variable: debt_service_block.total_debt_service
-      # target_expression is required by the schema but unused for sculpting type;
-      # set to a valid reference that exists in the model.
-      target_expression: "cashflow_block.cfads"
-      # target_value is the fallback dscr_target if assumption.dscr_target is absent.
-      target_value: 1.20
-      tolerance: 1.0e-6
-      max_iterations: 50
+      owned_blocks:
+        - construction_block   # reads idc_per_period (varying) + hard_capex (static)
+        - debt_service_block   # reads construction_block.total_capex; computes drawdown + service
+        - idc_block            # reads debt_service_block.cumulative_drawdown
 
 # ============================================================================
 # 4. Model Wiring
@@ -352,44 +340,52 @@ model_wiring:
     - from: generation_block.net_generation_kwh
       to: revenue_block.net_generation_kwh
 
-    # Debt sizing → Drawdown
-    - from: debt_sizing_block.debt_amount
-      to: debt_drawdown_block.debt_amount
+    # Construction capex_drawdown → Cashflow (CFI section)
+    - from: construction_block.capex_drawdown
+      to: cashflow_block.capex_drawdown
 
-    # Drawdown → IDC
-    - from: debt_drawdown_block.cumulative_drawdown
+    # Construction total_project_capex → Depreciation, Opex, Cashflow (R1: single source)
+    - from: construction_block.total_project_capex
+      to: depreciation_block.total_project_capex
+    - from: construction_block.total_project_capex
+      to: opex_block.total_project_capex
+    - from: construction_block.total_project_capex
+      to: cashflow_block.total_project_capex
+
+    # IDC per period → Construction block (circular leg — resolved by idc_capitalisation loop)
+    - from: idc_block.idc_per_period
+      to: construction_block.idc_per_period
+
+    # Construction total_capex → Debt service (drawdown section, circular leg)
+    - from: construction_block.total_capex
+      to: debt_service_block.total_capex
+
+    # Debt service cumulative_drawdown → IDC (circular leg)
+    - from: debt_service_block.cumulative_drawdown
       to: idc_block.cumulative_drawdown
 
-    # Debt sizing → Debt service (initial placeholder)
-    - from: debt_sizing_block.debt_amount
-      to: debt_service_block.debt_amount
+    # EBITDA from tax_block → Cashflow block (R2: single source)
+    - from: income_statement_block.ebitda
+      to: cashflow_block.ebitda
 
     # Revenue → Tax
     - from: revenue_block.revenue
-      to: tax_block.revenue
+      to: income_statement_block.revenue
 
     # Total opex (base O&M + insurance + land lease) → Tax
     - from: opex_block.total_opex
-      to: tax_block.opex
+      to: income_statement_block.opex
 
     # Depreciation → Tax
     - from: depreciation_block.depreciation
-      to: tax_block.depreciation
+      to: income_statement_block.depreciation
 
     # Debt service interest → Tax (tax shield; zero before sculpting)
     - from: debt_service_block.interest_payment
-      to: tax_block.interest_payment
-
-    # Revenue → Cashflow
-    - from: revenue_block.revenue
-      to: cashflow_block.revenue
-
-    # Total opex → Cashflow (EBITDA = revenue − total_opex)
-    - from: opex_block.total_opex
-      to: cashflow_block.opex
+      to: income_statement_block.interest_payment
 
     # Tax → Cashflow
-    - from: tax_block.tax
+    - from: income_statement_block.tax
       to: cashflow_block.tax
 
     # Debt service → Cashflow
@@ -405,26 +401,20 @@ model_wiring:
       to: waterfall_block.revenue
     - from: opex_block.total_opex
       to: waterfall_block.total_opex
-    - from: tax_block.tax
+    - from: income_statement_block.tax
       to: waterfall_block.tax
     - from: debt_service_block.total_debt_service
       to: waterfall_block.total_ds
     - from: dsra_block.dsra_required
       to: waterfall_block.dsra_req
 
-    # Returns inputs
-    - from: construction_block.capex_drawdown
-      to: returns_block.capex_drawdown
-    - from: debt_drawdown_block.drawdown
-      to: returns_block.debt_drawdown
-    - from: idc_block.idc_per_period
-      to: returns_block.idc_per_period
+    # Cashflow CFF inputs (from debt service and waterfall)
+    - from: debt_service_block.drawdown
+      to: cashflow_block.debt_drawdown
     - from: waterfall_block.equity_distribution
-      to: returns_block.equity_distribution
+      to: cashflow_block.equity_distribution
     - from: waterfall_block.equity_infusion
-      to: returns_block.equity_infusion
-    - from: cashflow_block.cfads
-      to: returns_block.cfads
+      to: cashflow_block.equity_top_up
 
   output_reports:
     income_statement:
@@ -434,16 +424,27 @@ model_wiring:
       - opex_block.land_lease
       - opex_block.total_opex
       - depreciation_block.depreciation
-      - tax_block.ebitda
-      - tax_block.ebit
-      - tax_block.pbt
-      - tax_block.tax
+      - income_statement_block.ebitda
+      - income_statement_block.ebit
+      - income_statement_block.pbt
+      - income_statement_block.tax
+
+    construction_capex:
+      - construction_block.capex_drawdown
+      - idc_block.idc_per_period
+      - construction_block.total_capex
+      - construction_block.cumulative_capex
+      - debt_service_block.drawdown
+      - debt_service_block.cumulative_drawdown
 
     cash_flow_statement:
       - cashflow_block.ebitda
       - cashflow_block.capex_during_ops
       - cashflow_block.cfads
+      - cashflow_block.project_cashflow
+      - cashflow_block.equity_invested
       - cashflow_block.free_cashflow
+      - cashflow_block.equity_cashflow
 
     debt_schedule:
       - debt_service_block.outstanding_debt_balance
@@ -451,9 +452,13 @@ model_wiring:
       - debt_service_block.interest_payment
       - debt_service_block.total_debt_service
       - dsra_block.dsra_required
+      - dsra_block.opening_balance
+      - dsra_block.top_up
+      - dsra_block.release
+      - dsra_block.closing_balance
 
     returns_summary:
-      - returns_block.equity_invested
-      - returns_block.equity_infusion
-      - returns_block.equity_cashflow
-      - returns_block.project_cashflow
+      - cashflow_block.equity_invested
+      - waterfall_block.equity_infusion
+      - cashflow_block.equity_cashflow
+      - cashflow_block.project_cashflow

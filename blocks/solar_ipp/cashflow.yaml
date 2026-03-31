@@ -1,75 +1,147 @@
-# Cashflow Block — CFADS and free cashflow
+# Cashflow Block — Standard 3-section Cash Flow Statement
 #
-# CFADS (Cash Flow Available for Debt Service):
-#   CFADS = EBITDA − Tax − capex_during_ops
-#   = Revenue − OPEX − Tax − capex_during_ops
+# Structures cashflows into the three standard sections to provide a complete
+# free cashflow template.  The block absorbs the former returns_block, which
+# is deleted; all KPI-layer naming conventions are preserved.
 #
-# capex_during_ops: quarterly maintenance capital expenditure during operations.
-#   = total_capex × maintenance_capex_pct / 4, active only during operations.
-#   Covers periodic component replacement (inverters, modules, switchgear).
-#   Default maintenance_capex_pct = 0.0 so legacy runs are unaffected.
+# ── SECTION 1: Cash Flow from Operations (CFO) ──────────────────────────────
+#   CFO = EBITDA − Tax − capex_during_ops
+#   CFO subtotal: cfads  (Cash Flow Available for Debt Service)
 #
-# Note: CFADS is defined BEFORE debt service so the sculpting solver can use it
-# to size the debt service schedule.  Tax is computed on PBT (EBIT − interest);
-# initially, interest = 0 (debt_service_block initialises to zero), so CFADS
-# is slightly overstated before sculpting.  This one-pass approximation is
-# standard practice for bankability screening models.
+#   CFADS is computed BEFORE debt service so the sculpting solver can use it
+#   to size the debt service schedule.  Tax is initially computed with
+#   interest = 0 (debt_service_block initialises to zero), so CFADS is slightly
+#   overstated before sculpting.  This one-pass approximation is standard
+#   practice for bankability screening models.
 #
-# Free Cashflow:
-#   free_cashflow = CFADS − total_debt_service
+#   capex_during_ops: quarterly maintenance capital expenditure during operations.
+#     = total_project_capex × maintenance_capex_pct / 4, active only during ops.
+#     Default maintenance_capex_pct = 0.0 so legacy runs are unaffected.
 #
-# The executor's KPI layer looks for "cashflow_block.cfads" by convention.
-# The executor's sculpting solver looks for "cashflow_block.cfads" by convention.
+# ── SECTION 2: Cash Flow from Investing (CFI) ────────────────────────────────
+#   CFI = −capex_drawdown  (construction capex outflow)
+#   Note: maintenance capex (capex_during_ops) is already deducted in CFO.
+#
+#   project_cashflow (FCFF = CFO + CFI, ungeared):
+#     project_cashflow = cfads × is_operational − capex_drawdown × is_construction
+#   Excludes all financing cash flows → pure project economic return.
+#   Used by the KPI layer for project IRR and NPV.
+#
+# ── SECTION 3: Cash Flow from Financing (CFF) ────────────────────────────────
+#   Inflows / outflows sourced from debt_service_block and waterfall_block;
+#   not recomputed here.
+#
+#   equity_invested: equity's share of construction capex (debt covers the rest).
+#     = −(capex_drawdown − debt_drawdown) × is_construction
+#     Debt drawdown includes capitalised IDC; equity pays only the residual.
+#
+#   free_cashflow: post-debt-service cashflow.
+#     = cfads − total_debt_service
+#
+#   equity_cashflow (FCFE): total equity cashflow across the project life.
+#     Construction: equity cash outflows for capex not covered by debt.
+#     Operations:   distributions received minus any cash calls (equity_top_up).
+#     = equity_invested + equity_distribution − equity_top_up × is_operational
+#   Used by the KPI layer for equity IRR and payback period.
+#
+# Naming conventions used by the executor (unchanged from prior blocks):
+#   cashflow_block.cfads            → sculpting solver, DSCR computation, KPI CFADS
+#   cashflow_block.equity_cashflow  → equity IRR, payback
+#   cashflow_block.project_cashflow → project IRR, NPV
 
 block_id: cashflow_block
 category: cashflow
 block_type: standard
-description: "CFADS (pre-DS) and free cashflow (post-DS); CFADS used by sculpting solver"
+description: "CFO/CFI/CFF cashflow statement; CFADS for sculpting solver; equity and project cashflows for IRR/NPV"
 
 inputs:
-  - name: revenue
-    source: revenue_block.revenue
-  - name: opex
-    source: opex_block.total_opex
+  # ── CFO inputs ──────────────────────────────────────────────────────────────
+  - name: ebitda
+    source: income_statement_block.ebitda
   - name: tax
-    source: tax_block.tax
-  - name: total_debt_service
-    source: debt_service_block.total_debt_service
-  - name: capex_per_mw
-    source: assumption.capex_per_mw
-  - name: capacity_mw
-    source: assumption.capacity_mw
+    source: income_statement_block.tax
+  - name: total_project_capex
+    source: construction_block.total_project_capex
   - name: maintenance_capex_pct
     source: assumption.maintenance_capex_pct
   - name: is_operational
     source: phase.is_operational
 
+  # ── CFI inputs ──────────────────────────────────────────────────────────────
+  - name: capex_drawdown
+    source: construction_block.capex_drawdown
+  - name: is_construction
+    source: phase.is_construction
+
+  # ── CFF inputs ──────────────────────────────────────────────────────────────
+  - name: total_debt_service
+    source: debt_service_block.total_debt_service
+  - name: debt_drawdown
+    source: debt_service_block.drawdown
+  - name: equity_distribution
+    source: waterfall_block.equity_distribution
+  - name: equity_top_up
+    source: waterfall_block.equity_infusion
+
 outputs:
+  # CFO
   - name: ebitda
     unit: INR_Lakhs
   - name: capex_during_ops
     unit: INR_Lakhs
   - name: cfads
     unit: INR_Lakhs
+  # CFI
+  - name: project_cashflow
+    unit: INR_Lakhs
+  # CFF
+  - name: equity_invested
+    unit: INR_Lakhs
   - name: free_cashflow
+    unit: INR_Lakhs
+  - name: equity_cashflow
     unit: INR_Lakhs
 
 body:
-  # EBITDA: earnings before interest, tax, depreciation, amortisation
+  # ── SECTION 1: Cash Flow from Operations (CFO) ──────────────────────────────
+
+  # EBITDA passed through from income_statement_block (single source of truth)
   - target: ebitda
-    expr: "revenue - opex"
+    expr: "ebitda"
 
   # Maintenance capex during operations: periodic replacement provision
   # (e.g. inverters, modules). Zero by default; grows with maintenance_capex_pct.
-  - target: capex_total_base
-    expr: "scalar_to_series(capex_per_mw * capacity_mw)"
   - target: capex_during_ops
-    expr: "capex_total_base * maintenance_capex_pct / 4.0 * is_operational"
+    expr: "total_project_capex * maintenance_capex_pct / 4.0 * is_operational"
 
-  # CFADS: post-tax, post-maintenance-capex, pre-debt-service
+  # CFADS (CFO subtotal): post-tax, post-maintenance-capex, pre-debt-service.
+  # Used by the sculpting solver to size the debt repayment schedule.
   - target: cfads
     expr: "ebitda - tax - capex_during_ops"
 
-  # Free cashflow: remaining after debt service
+  # ── SECTION 2: Cash Flow from Investing (CFI) ────────────────────────────────
+
+  # Project cashflow (FCFF = CFO + CFI, ungeared):
+  #   Construction: total hard-capex outflow (negative)
+  #   Operations:   CFADS (pre-debt-service free cashflow, positive)
+  # Financing structure is excluded → pure project economic return.
+  - target: project_cashflow
+    expr: "capex_drawdown * is_construction * -1.0 + cfads * is_operational"
+
+  # ── SECTION 3: Cash Flow from Financing (CFF) ────────────────────────────────
+
+  # Equity invested during construction: hard capex not covered by debt drawdown.
+  # Debt drawdown includes capitalised IDC; equity covers only the residual fraction.
+  # (negative sign: cash outflow from equity perspective)
+  - target: equity_invested
+    expr: "(capex_drawdown - debt_drawdown) * is_construction * -1.0"
+
+  # Free cashflow (post-debt-service): residual after all lender obligations.
   - target: free_cashflow
     expr: "cfads - total_debt_service"
+
+  # Equity cashflow (FCFE): total equity perspective across the project life.
+  #   Construction: equity cash outflows for capex not covered by debt
+  #   Operations:   distributions received minus any cash calls (equity_top_up)
+  - target: equity_cashflow
+    expr: "equity_invested + equity_distribution - equity_top_up * is_operational"

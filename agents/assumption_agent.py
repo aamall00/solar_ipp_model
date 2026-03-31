@@ -251,18 +251,6 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
             "If user gives useful life in years, convert: rate = 1/life."
         ),
     },
-    # ---- IDC capitalisation ----
-    "idc_capitalised": {
-        "type": "scalar", "unit": "flag (0.0 or 1.0)",
-        "default": 0.0,
-        "aliases": ["capitalise_idc", "idc_into_debt", "idc_cap"],
-        "constraints": {"min": 0.0, "max": 1.0},
-        "description": (
-            "0.0 = IDC funded by equity (default). "
-            "1.0 = IDC capitalised into the debt base (adds a goal_seek solve loop). "
-            "Set to 1.0 if user mentions 'capitalised IDC' or 'IDC into debt'."
-        ),
-    },
     # ---- Equity ----
     "equity_irr_target": {
         "type": "scalar", "unit": "per_year (decimal)",
@@ -413,9 +401,9 @@ _WIND_CANONICAL: Dict[str, Dict[str, Any]] = {
     # ---- Depreciation method ----
     "depreciation_method":      _CANONICAL["depreciation_method"],
     "wdv_rate":                 _CANONICAL["wdv_rate"],
-    "use_wdv":                  _CANONICAL["use_wdv"],
-    # ---- IDC capitalisation ----
-    "idc_capitalised":          _CANONICAL["idc_capitalised"],
+    # use_wdv is intentionally excluded: it is a numeric flag derived from
+    # depreciation_method in _derive_cross_assumptions and must not be set
+    # directly by the LLM or the user.
     # ---- Equity ----
     "equity_irr_target":        _CANONICAL["equity_irr_target"],
 }
@@ -741,8 +729,21 @@ class AssumptionAgent:
 
     def _derive_cross_assumptions(self, assumptions: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Compute model-skeleton quantities from filled assumptions.
-        Adds: construction_periods, operations_periods, debt_tenor_periods.
+        Compute derived quantities from filled assumptions.
+
+        These three derivations must remain in Python rather than YAML blocks
+        for the following reasons:
+
+        1. Period counts (construction_periods, operations_periods, debt_tenor_periods):
+           These define the model's time axis — n_periods, milestone indices, phase
+           masks — which must be established BEFORE any YAML blocks execute.  They
+           are inputs to ProjectSkeleton, not outputs of a calculation block.
+
+        2. use_wdv flag (float derived from depreciation_method string enum):
+           The DSL expression language has no string-comparison primitive, so the
+           "slm"/"wdv" → 0.0/1.0 conversion cannot be expressed in a YAML body.
+           The resulting numeric flag is consumed by depreciation_block.yaml via
+           the standard assumption.use_wdv source.
         """
         a = dict(assumptions)
 
@@ -755,7 +756,8 @@ class AssumptionAgent:
         debt_years = float(a.get("debt_tenor_years", 18.0))
         a["debt_tenor_periods"] = int(round(debt_years * 4))
 
-        # Derive numeric WDV flag from depreciation_method enum
+        # Derive numeric WDV flag from depreciation_method string enum.
+        # Cannot be expressed in YAML: DSL has no string-comparison primitive.
         dep_method = a.get("depreciation_method", "slm")
         a["use_wdv"] = 1.0 if dep_method == "wdv" else 0.0
 

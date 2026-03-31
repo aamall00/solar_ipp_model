@@ -1,35 +1,23 @@
 # IDC Block — Interest During Construction
 #
-# Two modes depending on idc_capitalised assumption:
+# IDC is always capitalised into the debt base.  The circular dependency
+# (drawdown includes IDC; IDC depends on cumulative drawdown) is resolved
+# generically by the array_fixed_point solver declared in solve_loops.
+# This block's body IS the executable formula — evaluated each iteration.
 #
-# idc_capitalised = 0  (default, equity-funded IDC):
-#   idc[t] = lag(cumulative_drawdown, 1)[t] × (interest_rate / 4) × is_construction[t]
-#   Uses opening balance (prior-period cumulative debt drawdown).
-#   IDC is an equity cost; does not increase the debt base.
-#
-# idc_capitalised = 1  (debt-funded IDC, new formulas):
-#   IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
-#   Total_Capex(t) = capex(t) + IDC(t)
-#   Debt(t)        = debt_pct × Total_Capex(t)
-#
-#   opening_debt(t) = cumulative_debt(t-1)  [zero at financial close]
-#   closing_debt(t) = cumulative_debt(t-1) + Debt(t)
-#
-#   Circular reference resolved analytically per period:
-#     total_capex(t) = (capex(t) + D(t-1) × r_q) / (1 − debt_pct × r_q / 2)
-#   Executor _run_idc_forward_march writes idc_block.*, debt_drawdown_block.*,
-#   and debt_sizing_block.* directly; this YAML body is NOT re-evaluated for cap=1.
+# Formula (average-balance convention):
+#   idc[t] = (opening_debt[t] + closing_debt[t]) / 2 × r_q × is_construction[t]
+#   opening_debt[t] = lag(cumulative_drawdown, 1)[t]   [zero at t=0]
+#   closing_debt[t] = cumulative_drawdown[t]
 #
 # Key implementation decisions
 # ------------------------------
 # 1. RATE  — simple division: interest_rate / 4.0 (quarterly model).
 #    Project finance term-sheets quote annual nominal (simple) rates for IDC.
 #
-# 2. TIMING (cap=0) — lag(cumulative_drawdown, 1) gives the opening balance.
-#    Period 0 correctly carries zero IDC.
-#
-# 3. AVERAGE BALANCE (cap=1) — uses (opening + closing) / 2 per period,
-#    implemented analytically in the executor forward-march.
+# 2. AVERAGE BALANCE — (opening + closing) / 2 per period.  Period 0 IDC is
+#    half the closing-balance value, as only half a period of interest accrues
+#    on the first draw.  Matches standard project finance term-sheet treatment.
 #
 # Assumptions consumed:
 #   interest_rate   — Annual nominal interest rate, e.g. 0.0975
@@ -37,11 +25,11 @@
 block_id: idc_block
 category: idc
 block_type: standard
-description: "Interest During Construction on debt drawdowns, funded by equity"
+description: "Interest During Construction — capitalised into debt base, average-balance convention"
 
 inputs:
   - name: cumulative_drawdown
-    source: debt_drawdown_block.cumulative_drawdown
+    source: debt_service_block.cumulative_drawdown
   - name: interest_rate
     source: assumption.interest_rate
   - name: is_construction
@@ -60,17 +48,18 @@ body:
   - target: r_simple
     expr: "scalar_to_series(interest_rate / 4.0)"
 
-  # IDC[t] = balance drawn in PRIOR periods × r_simple × is_construction[t]
-  # lag(cumulative_drawdown, 1) shifts the series right by one period (fills t=0 with 0),
-  # giving the outstanding balance at the START of period t.
+  # IDC[t] = average of opening and closing balance × r_simple × is_construction[t]
+  # lag(cumulative_drawdown, 1) = opening balance (zero at t=0)
+  # cumulative_drawdown         = closing balance
+  # Average-balance convention matches standard project finance term-sheet treatment.
   - target: idc_per_period
-    expr: "lag(cumulative_drawdown, 1) * r_simple * is_construction"
+    expr: "(lag(cumulative_drawdown, 1) + cumulative_drawdown) / 2.0 * r_simple * is_construction"
 
   # Running total IDC (informational; used in returns block for equity cost)
   - target: cumulative_idc
     expr: "cumsum(idc_per_period)"
 
-  # Scalar total IDC broadcast to full series — used by IDC goal_seek loop
-  # when idc_capitalised=1: goal_seek finds idc_supplement s.t. idc_total = idc_supplement
+  # Scalar total IDC broadcast to full series — read by debt_sizing_block
+  # each iteration to include capitalised IDC in total project cost.
   - target: idc_total
     expr: "scalar_to_series(max(cumulative_idc))"

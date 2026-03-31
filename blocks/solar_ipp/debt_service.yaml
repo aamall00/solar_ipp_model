@@ -1,57 +1,134 @@
-# Debt Service Block — DSCR-sculpted debt service schedule
+# Debt Service Block — Full debt lifecycle: drawdown → sizing → service ledger
 #
-# This block is a PLACEHOLDER whose outputs are OVERWRITTEN by the
-# sculpting_solver declared in the model template's solve_loops section.
+# Section 1 — Drawdown (construction period)
+#   drawdown[t]            = debt_pct × total_capex[t]
+#   cumulative_drawdown[t] = cumsum(drawdown)[t]
 #
-# The body initialises all outputs to zero so that:
-#   (a) downstream blocks (cashflow, tax, waterfall) have valid arrays before
-#       the sculpting loop fires, and
-#   (b) the sculpting loop can safely read cashflow_block.cfads.
+#   The circular dependency (drawdown → idc → total_capex → drawdown) is resolved
+#   by the array_fixed_point solver (idc_capitalisation loop) in solve_loops.
 #
-# After the sculpting solve_loop converges, the executor writes:
-#   debt_service_block.principal_repayment
-#   debt_service_block.interest_payment
-#   debt_service_block.outstanding_debt_balance
-#   debt_service_block.total_debt_service
+# Section 2 — Sizing (post-loop, scalar aggregation at COD)
+#   debt_amount        = max(cumulative_drawdown) during construction
+#   total_project_cost = debt_amount / debt_pct  (= Σ hard_capex + Σ IDC)
+#   equity_amount      = total_project_cost − debt_amount
 #
-# The sculpting_solver targets DSCR = dscr_target using the PV-scaling algorithm.
-# Repayments are zero outside the operational debt period (COD → debt_maturity).
+# Section 3 — Service ledger (equal-principal repayment, operational period)
+#   debt_addition[t]       = debt_amount at first operational period (COD), else 0
+#   opening[t]             = lag(closing, 1)[t] + debt_addition[t]
+#   interest_payment[t]    = opening[t] × (interest_rate / 4) × is_operational[t]
+#   principal_repayment[t] = min(opening[t], debt_amount / debt_repayment_periods)
+#                            × lag(is_operational, moratorium_periods)[t]
+#   closing[t]             = opening[t] − principal_repayment[t]
+#   total_debt_service[t]  = principal_repayment[t] + interest_payment[t]
 #
-# Assumptions consumed (read by the executor's _run_sculpting, not by the block body):
-#   interest_rate       — Annual nominal rate for quarterly compounding, e.g. 0.0975
-#   moratorium_periods  — Moratorium after COD (integer quarters), typically 0
-#   dscr_target         — Target DSCR ratio, e.g. 1.20
+# Assumptions consumed:
+#   debt_pct                — Senior debt fraction of total project cost, e.g. 0.70
+#   interest_rate           — Annual nominal rate, e.g. 0.0975 (quarterly: / 4)
+#   moratorium_periods      — Quarters after COD before principal repayment begins
+#   debt_repayment_periods  — Tenor of equal-principal repayment in quarters
 
 block_id: debt_service_block
 category: debt
 block_type: standard
-description: "DSCR-sculpted debt service (outputs overwritten by sculpting_solver)"
+description: "Full debt lifecycle: construction drawdown, COD sizing, and equal-principal service ledger"
 
 inputs:
-  - name: cfads
-    source: cashflow_block.cfads
-  - name: debt_amount
-    source: debt_sizing_block.debt_amount
+  - name: total_capex
+    source: construction_block.total_capex
+  - name: debt_pct
+    source: assumption.debt_pct
+  - name: is_construction
+    source: phase.is_construction
   - name: interest_rate
     source: assumption.interest_rate
+  - name: moratorium_periods
+    source: assumption.moratorium_periods
+  - name: debt_repayment_periods
+    source: assumption.debt_repayment_periods
+  - name: is_operational
+    source: phase.is_operational
 
 outputs:
-  - name: total_debt_service
+  # Section 1 — Drawdown
+  - name: drawdown
+    unit: INR_Lakhs
+  - name: cumulative_drawdown
+    unit: INR_Lakhs
+  # Section 2 — Sizing
+  - name: debt_amount
+    unit: INR_Lakhs
+  - name: total_project_cost
+    unit: INR_Lakhs
+  - name: equity_amount
+    unit: INR_Lakhs
+  # Section 3 — Service ledger
+  - name: opening
+    unit: INR_Lakhs
+  - name: interest_payment
     unit: INR_Lakhs
   - name: principal_repayment
     unit: INR_Lakhs
-  - name: interest_payment
+  - name: total_debt_service
+    unit: INR_Lakhs
+  - name: closing
     unit: INR_Lakhs
   - name: outstanding_debt_balance
     unit: INR_Lakhs
 
 body:
-  # Initialise to zero — sculpting_solver will overwrite these arrays
-  - target: total_debt_service
-    expr: "scalar_to_series(0.0)"
-  - target: principal_repayment
-    expr: "scalar_to_series(0.0)"
+  # --- Section 1: Drawdown ---
+
+  # Quarterly debt drawdown: debt fraction of total period capex (hard + IDC)
+  - target: drawdown
+    expr: "debt_pct * total_capex"
+
+  # Cumulative drawn — equals total debt at end of construction
+  - target: cumulative_drawdown
+    expr: "cumsum(drawdown)"
+
+  # --- Section 2: Sizing ---
+
+  # Total senior debt = closing cumulative drawdown at end of construction
+  - target: debt_amount
+    expr: "scalar_to_series(max(cumulative_drawdown * is_construction))"
+
+  # Total project cost = hard capex + capitalised IDC = debt / debt_pct
+  - target: total_project_cost
+    expr: "scalar_to_series(max(debt_amount) / debt_pct)"
+
+  # Equity = total project cost × (1 − debt fraction)
+  - target: equity_amount
+    expr: "total_project_cost - debt_amount"
+
+  # --- Section 3: Service ledger ---
+
+  # Debt enters the ledger once at COD (the first operational period)
+  - target: debt_addition
+    expr: "debt_amount * (is_operational - lag(is_operational, 1))"
+
+  # Opening balance: prior period closing plus the one-off debt addition at COD
+  - target: opening
+    expr: "lag(closing, 1) + debt_addition"
+
+  # Interest: quarterly rate on opening balance, charged throughout operations
+  # (including any moratorium periods — interest-only during that window)
   - target: interest_payment
-    expr: "scalar_to_series(0.0)"
+    expr: "opening * interest_rate / 4.0 * is_operational"
+
+  # Equal principal instalment, starting after moratorium
+  # lag(is_operational, moratorium_periods) = 0 during moratorium, 1 thereafter
+  # min_series caps the last instalment to the remaining balance
+  - target: principal_repayment
+    expr: "min_series(opening, debt_amount / debt_repayment_periods) * lag(is_operational, moratorium_periods)"
+
+  # Closing balance: opening minus principal repaid this period
+  - target: closing
+    expr: "opening - principal_repayment"
+
+  # Total debt service: cash out the door each period
+  - target: total_debt_service
+    expr: "principal_repayment + interest_payment"
+
+  # Alias for downstream blocks (cashflow, waterfall, DSRA, returns)
   - target: outstanding_debt_balance
-    expr: "scalar_to_series(0.0)"
+    expr: "closing"

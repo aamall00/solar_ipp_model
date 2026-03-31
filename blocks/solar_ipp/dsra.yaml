@@ -1,29 +1,30 @@
-# DSRA Block — Debt Service Reserve Account requirement
+# DSRA Block — Debt Service Reserve Account requirement and ledger
 #
-# Computes the required DSRA balance as a fixed number of months of
-# forward-looking debt service.  The DSRA is funded through the waterfall
-# as a priority-2 bucket (before equity distributions).
+# Section 1 — Requirement
+#   dsra_required[t] = lag(total_debt_service, 1) × (dsra_months / 3.0) × is_debt_outstanding[t]
 #
-# dsra_required[t] = lag(total_debt_service, 1) × (dsra_months / 3.0)
+#   lag(·,1) uses the previous period's debt service as a proxy for the upcoming
+#   period (conservative approximation). dsra_months / 3.0 converts months to
+#   quarters (3 months per quarter).
 #
-# The lag(·,1) looks one quarter ahead (using forward lag convention) to
-# approximate the "next period's debt service" reserve requirement.
-# dsra_months / 3.0 converts months to quarters (3 months per quarter).
+# Section 2 — Ledger
+#   Tracks the DSRA balance period by period.  The waterfall always funds the full
+#   top-up, so closing_balance == dsra_required at all times (no shortfall).
 #
-# top_up[t]    = max(0, dsra_required[t] − dsra_balance[t−1])
-# release[t]   = max(0, dsra_balance[t−1] − dsra_required[t])
+#   opening_balance[t] = lag(dsra_required, 1)[t] × is_operational[t]
+#   top_up[t]          = max(0, dsra_required[t] − opening_balance[t])
+#   release[t]         = max(0, opening_balance[t] − dsra_required[t])
+#   closing_balance[t] = dsra_required[t]   (always funded to target)
 #
-# Note: dsra_balance (opening/closing) is handled by the DSRA ledger block
-# declared separately in the full model template.  This block provides
-# dsra_required as a forward-looking target for the waterfall.
+#   At debt maturity dsra_required falls to 0 and the full balance is released.
 #
 # Assumptions consumed:
-#   dsra_months   — Reserve coverage in months, e.g. 6 (= 2 quarters of DS)
+#   dsra_months  — Reserve coverage in months, e.g. 6 (= 2 quarters of debt service)
 
 block_id: dsra_block
 category: dsra
 block_type: standard
-description: "DSRA requirement: forward-looking debt service reserve target"
+description: "DSRA requirement and balance ledger: required reserve, top-up, release, and closing balance"
 
 inputs:
   - name: total_debt_service
@@ -32,14 +33,44 @@ inputs:
     source: assumption.dsra_months
   - name: is_debt_outstanding
     source: phase.is_debt_outstanding
+  - name: is_operational
+    source: phase.is_operational
 
 outputs:
+  # Section 1 — Requirement
   - name: dsra_required
+    unit: INR_Lakhs
+  # Section 2 — Ledger
+  - name: opening_balance
+    unit: INR_Lakhs
+  - name: top_up
+    unit: INR_Lakhs
+  - name: release
+    unit: INR_Lakhs
+  - name: closing_balance
     unit: INR_Lakhs
 
 body:
-  # Forward equivalent of next quarter's DS scaled to the reserve coverage
-  # lag(x, -1) would shift forward; lag(x, 1) shifts back. We use the previous
-  # period's DS as a proxy for the upcoming period (conservative approximation).
+  # --- Section 1: Requirement ---
+
+  # Forward-looking reserve target: prior period DS scaled to coverage window
   - target: dsra_required
     expr: "lag(total_debt_service, 1) * (dsra_months / 3.0) * is_debt_outstanding"
+
+  # --- Section 2: Ledger ---
+
+  # Opening balance = prior period's closing balance (zero before operations)
+  - target: opening_balance
+    expr: "lag(dsra_required, 1) * is_operational"
+
+  # Top-up required when reserve target increases
+  - target: top_up
+    expr: "max_series(dsra_required - opening_balance, scalar_to_series(0.0))"
+
+  # Release when reserve target decreases (full release at debt maturity)
+  - target: release
+    expr: "max_series(opening_balance - dsra_required, scalar_to_series(0.0))"
+
+  # Closing balance: always funded to target by waterfall convention
+  - target: closing_balance
+    expr: "dsra_required"

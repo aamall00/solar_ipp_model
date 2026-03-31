@@ -1,4 +1,4 @@
-# Tax Block — Corporate income tax
+# Income Statement Block — Corporate income tax
 #
 # Taxable income (PBT) = EBITDA − depreciation − interest_payment
 # Current tax = max(0, PBT) × tax_rate
@@ -12,7 +12,7 @@
 # Assumptions consumed:
 #   tax_rate  — Effective corporate tax rate, e.g. 0.25 (25 %)
 
-block_id: tax_block
+block_id: income_statement_block
 category: tax
 block_type: standard
 description: "Corporate income tax on EBITDA minus depreciation and interest"

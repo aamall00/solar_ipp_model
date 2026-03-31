@@ -10,12 +10,11 @@ Blocks are loaded at runtime from the block library under blocks/solar_ipp/*.yam
 not hardcoded in the agent.  The agent's job is to:
 
   1. _load_block_library()       — read all 14 YAML files from blocks/solar_ipp/
-  2. _configure_block_inputs()   — wire assumption sources; inject idc_supplement
-                                   input into debt_sizing_block when idc_capitalised=1
+  2. _configure_block_inputs()   — wire assumption sources
   3. _build_skeleton()           — compute periods/milestones from assumptions
   4. _build_assumption_schema()  — map filled_assumptions → assumption_schema entries
   5. _determine_solve_loops()    — sculpting loop only when debt_sizing_mode=1;
-                                   goal_seek loop for IDC when idc_capitalised=1
+                                   IDC array_fixed_point loop always present
   6. _units_check()              — basic units algebra sanity (no AI)
   7. _claude_structure_review()  — Claude flags structural anomalies (optional)
   8. Parse with DSLParser         — validate structure
@@ -329,12 +328,6 @@ class BlueprintAgent:
         entries.append(_entry("dsra_months", "scalar", "months",
                                float(a.get("dsra_months", 6.0))))
 
-        # --- IDC ---
-        entries.append(_entry("idc_capitalised", "scalar", "flag",
-                               float(a.get("idc_capitalised", 0.0))))
-        # idc_supplement starts at 0 and is updated by the goal_seek loop
-        entries.append(_entry("idc_supplement", "scalar", "INR_Lakhs",
-                               float(a.get("idc_supplement", 0.0))))
 
         # --- Tax ---
         entries.append(_entry("tax_rate", "scalar", "ratio",
@@ -382,17 +375,14 @@ class BlueprintAgent:
     ) -> Dict[str, Any]:
         """
         Return a (shallow-copied) block dict with inputs verified against the
-        validated assumption set.  For debt_sizing_block, inject the
-        idc_supplement input dynamically (it's always present since the library
-        block already declares it; this method is a no-op for most blocks).
+        validated assumption set.  This is a no-op for most blocks; inputs are
+        fully declared in the YAML block library files.
         """
         import copy
         b = copy.deepcopy(block)
 
         # Verify assumption.* sources exist in the validated assumption set
-        all_assumption_names = set(_CANONICAL.keys()) | {
-            "idc_supplement", "idc_capitalised",
-        }
+        all_assumption_names = set(_CANONICAL.keys())
         for inp in b.get("inputs", []):
             src: str = inp.get("source", "")
             if src.startswith("assumption."):
@@ -407,7 +397,7 @@ class BlueprintAgent:
         """
         Conditional solve loop configuration:
           - Sculpting loop: ONLY when debt_sizing_mode = 1 (CFADS-sculpted).
-          - IDC goal_seek:  ONLY when idc_capitalised = 1.
+          - IDC array_fixed_point: always present (IDC is always capitalised).
 
         Note: when debt_sizing_mode = 0 (cost-based), the sculpting loop is
         still required for the executor to compute equal-principal debt service.
@@ -430,21 +420,20 @@ class BlueprintAgent:
             "max_iterations":    50,
         })
 
-        # IDC forward-march — only when idc_capitalised = 1
-        # Uses closed-form per-period analytical solution (no iteration):
-        #   IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
-        #   Total_Capex(t) = capex(t) + IDC(t)
-        #   Debt(t)        = debt_pct × Total_Capex(t)
-        # free_variable/target_expression kept so the DSL cycle-checker accepts the loop.
-        idc_capitalised = float(a.get("idc_capitalised", 0.0))
-        if idc_capitalised >= 0.5:
-            loops.append({
-                "loop_id":           "idc_capitalisation",
-                "type":              "idc_forward_march",
-                "free_variable":     "assumption.idc_supplement",
-                "target_expression": "idc_block.idc_total - assumption.idc_supplement",
-                "target_value":      0.0,
-            })
+        # IDC array fixed-point — always present (IDC always capitalised into debt).
+        # The circular dependency (debt_sizing_block reads idc_block.idc_total;
+        # idc_block reads debt_drawdown_block.cumulative_drawdown; drawdown uses
+        # debt_sizing_block.debt_amount) is resolved generically by re-evaluating
+        # owned_blocks in declared order until idc_per_period converges.
+        # Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085; converges in ~3–5 iters.
+        loops.append({
+            "loop_id":           "idc_capitalisation",
+            "type":              "array_fixed_point",
+            "free_variable":     "idc_block.idc_per_period",
+            "target_expression": "idc_block.idc_per_period",
+            "target_value":      0.0,
+            "owned_blocks":      ["debt_sizing_block", "debt_drawdown_block", "idc_block"],
+        })
 
         return loops
 
@@ -526,9 +515,6 @@ class BlueprintAgent:
         tenor      = a.get("debt_tenor_years", "?")
         mode_flag  = float(a.get("debt_sizing_mode", 0.0))
         mode_str   = "CFADS-sculpted" if mode_flag >= 0.5 else "equal-principal"
-        idc_cap    = float(a.get("idc_capitalised", 0.0))
-        idc_str    = "capitalised into debt" if idc_cap >= 0.5 else "equity-funded"
-
         asset_label = self.asset_type.upper()
         cf_key  = self._asset_meta["cuf_or_cf_key"]
         cf_val  = a.get(cf_key, self._asset_meta["cuf_or_cf_default"])
@@ -539,7 +525,7 @@ class BlueprintAgent:
             f"  Debt: {float(debt_pct)*100:.0f}% at {float(rate)*100:.2f}% p.a., "
             f"{tenor}-yr tenor\n"
             f"  Debt service: {mode_str}\n"
-            f"  IDC treatment: {idc_str}\n\n"
+            f"  IDC treatment: capitalised into debt (average-balance)\n\n"
             "Flag any structural concerns or unusual combinations. "
             "Be specific. 2-4 bullet points only."
         )
@@ -568,9 +554,7 @@ class BlueprintAgent:
         mode      = ("CFADS-sculpted" if float(a.get("debt_sizing_mode", 0)) >= 0.5
                      else "equal-principal")
         dscr      = a.get("dscr_target", "?")
-        idc_cap   = float(a.get("idc_capitalised", 0.0))
-        idc_str   = "IDC capitalised into debt (goal_seek loop)" if idc_cap >= 0.5 \
-                    else "IDC equity-funded"
+        idc_str   = "IDC capitalised into debt (array_fixed_point loop)"
         warn_str  = ""
         if validation.warnings:
             warn_str = "Validation warnings: " + "; ".join(

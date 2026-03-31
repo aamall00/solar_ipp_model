@@ -70,7 +70,7 @@ class SolveLoopType(str, Enum):
     goal_seek = "goal_seek"
     sculpting = "sculpting"
     fixed_point = "fixed_point"
-    idc_forward_march = "idc_forward_march"
+    array_fixed_point = "array_fixed_point"
 
 
 class DebtStructure(str, Enum):
@@ -350,6 +350,15 @@ class SolveLoop(BaseModel):
     target_value: float
     tolerance: float = Field(default=1e-6, gt=0)
     max_iterations: int = Field(default=50, ge=1)
+    owned_blocks: List[str] = Field(
+        default_factory=list,
+        description=(
+            "Ordered list of block_ids whose YAML body expressions are re-evaluated "
+            "each iteration. Required for array_fixed_point loops. The executor "
+            "re-evaluates these blocks in declared order each pass, updating namespace "
+            "in-place. Blocks are excluded from the main evaluation plan."
+        ),
+    )
 
     @field_validator("free_variable")
     @classmethod
@@ -359,6 +368,16 @@ class SolveLoop(BaseModel):
                 f"free_variable must be 'assumption.X' or 'block_id.output'. Got: '{v}'"
             )
         return v
+
+    @model_validator(mode="after")
+    def array_fp_requires_owned_blocks(self) -> "SolveLoop":
+        if self.type == SolveLoopType.array_fixed_point and not self.owned_blocks:
+            raise ValueError(
+                f"SolveLoop '{self.loop_id}' has type=array_fixed_point but "
+                f"owned_blocks is empty. Declare the block_ids whose YAML expressions "
+                f"form the circular dependency, in topological iteration order."
+            )
+        return self
 
 
 # --- Main block model ---

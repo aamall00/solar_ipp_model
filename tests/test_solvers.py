@@ -98,10 +98,9 @@ class TestGoalSeek:
 
     def test_idc_capitalisation_scenario(self):
         """
-        Validates the per-period closed-form analytical solution used by
-        _run_idc_forward_march for idc_capitalised = 1.
+        Validates the average-balance IDC formula used by _run_array_fixed_point.
 
-        New formulas (3 construction quarters, capex_schedule = [30%, 40%, 30%]):
+        Formulas (3 construction quarters, capex_schedule = [30%, 40%, 30%]):
           IDC(t)         = r_q × (opening_debt(t) + closing_debt(t)) / 2
           Total_Capex(t) = capex_draw(t) + IDC(t)
           Debt(t)        = debt_pct × Total_Capex(t)

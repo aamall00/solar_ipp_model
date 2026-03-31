@@ -108,6 +108,17 @@ class FixedPointResult:
     convergence_history: List[float] = field(default_factory=list)
 
 
+@dataclass
+class ArrayFixedPointResult:
+    """Result of an array-valued fixed-point iteration."""
+    loop_id: str
+    converged: bool
+    iterations: int
+    solution: np.ndarray          # converged array (e.g. idc_per_period)
+    final_residual: float         # max(|x_new - x_old|) at termination
+    convergence_history: List[float] = field(default_factory=list)
+
+
 # ---------------------------------------------------------------------------
 # 1. Goal-seek solver  (Brent's method)
 # ---------------------------------------------------------------------------
@@ -520,6 +531,74 @@ def fixed_point_solver(
             f"Consider: (1) Check for DSRA over-specification, "
             f"(2) Increase max_iterations, "
             f"(3) Verify that circular dependency is genuinely mild."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# 4. Array fixed-point solver  (time-series circular dependencies)
+# ---------------------------------------------------------------------------
+
+
+def array_fixed_point_solver(
+    f: "Callable[[np.ndarray], np.ndarray]",
+    x_init: np.ndarray,
+    loop_id: str,
+    tolerance: float = 1e-6,
+    max_iterations: int = 25,
+) -> ArrayFixedPointResult:
+    """
+    Fixed-point iteration for array-valued state: x_{n+1} = f(x_n).
+
+    Converges when max(|x_{n+1} - x_n|) < tolerance.  Suitable for
+    within-period circular dependencies where the iteration map is a
+    contraction — e.g. IDC ↔ debt drawdown where the contraction ratio
+    is debt_pct × r_q ≈ 0.017 (converges in ~3 iterations for solar IPP).
+
+    Parameters
+    ----------
+    f              : array iteration function; x_new = f(x_current)
+    x_init         : starting array (typically zeros)
+    loop_id        : identifier for error messages
+    tolerance      : max(|x_new - x_old|) < tolerance → converged
+    max_iterations : hard cap
+
+    Returns
+    -------
+    ArrayFixedPointResult
+
+    Raises
+    ------
+    ModelConvergenceError : if residual > tolerance after max_iterations
+    """
+    history: List[float] = []
+    x = np.asarray(x_init, dtype=np.float64).copy()
+
+    for iteration in range(max_iterations):
+        x_new = np.asarray(f(x), dtype=np.float64)
+        residual = float(np.max(np.abs(x_new - x)))
+        history.append(residual)
+
+        if residual < tolerance:
+            return ArrayFixedPointResult(
+                loop_id=loop_id,
+                converged=True,
+                iterations=iteration + 1,
+                solution=x_new,
+                final_residual=residual,
+                convergence_history=history,
+            )
+        x = x_new
+
+    final_residual = history[-1] if history else float("nan")
+    raise ModelConvergenceError(
+        loop_id=loop_id,
+        last_value=float("nan"),
+        residual=final_residual,
+        suggestion=(
+            f"Array fixed-point iteration did not converge after {max_iterations} "
+            f"iterations (max|x_new - x_old| = {final_residual:.4e} > tol {tolerance:.4e}). "
+            f"Check that the circular dependency is a contraction mapping."
         ),
     )
 

@@ -1,42 +1,36 @@
-# Depreciation Block — SLM or WDV on 95% of project capex
+# Depreciation Block — Asset Ledger (SLM / WDV)
 #
-# Depreciable asset base = 95% of total project capex (land excluded at 5%).
+# Ledger structure (per period):
+#   asset_addition[t]  = depreciable_base at first operational period, else 0
+#   opening[t]         = lag(closing, 1)[t] + asset_addition[t]
+#   depreciation[t]    = SLM or WDV charge (see below)
+#   closing[t]         = opening[t] - depreciation[t]
 #
 # SLM (straight-line method):
-#   quarterly_charge = depreciable_base × depreciation_rate / 4
+#   charge = depreciable_base × depreciation_rate / 4   (constant during operations)
 #
 # WDV (written-down value / declining balance):
-#   Approximated via escalate(): depreciable_base × (wdv_rate/4) × (1-wdv_rate)^((t-cod)/4)
-#   Implemented as: base × (wdv_rate/4) × escalate(1, -wdv_rate) × 1/(1-wdv_rate)
-#   The 1/(1-wdv_rate) correction offsets escalate's absolute period index, placing
-#   the full-rate charge at COD (period 4 = end of 1-year construction phase).
+#   charge = opening[t] × wdv_rate / 4                  (true declining balance on opening)
 #
 # Method selection: use_wdv flag (0.0 = SLM, 1.0 = WDV).
-# This flag is derived automatically from depreciation_method by the ingestion agent;
-# the blending expression allows both paths to coexist in a single standard block.
 #
-# For Karnataka solar IPP:
-#   - Book/tax depreciation (SLM): 5% p.a. → 20-year useful life
-#   - WDV accelerated (if elected): 40% p.a. (Indian Income Tax Act, Schedule II)
+# Depreciable asset base = 95% of total hard capex (land excluded at 5%).
+# IDC is not depreciable under Indian tax law.
 #
 # Assumptions consumed:
-#   capex_per_mw          — Specific capex in INR Lakhs/MW, e.g. 450.0
-#   capacity_mw           — Installed capacity in MW, e.g. 100.0
-#   depreciation_rate     — Annual SLM rate as decimal, e.g. 0.05 (5% p.a.)
-#   depreciation_method   — Enum: 'slm' or 'wdv' (informational; use_wdv drives logic)
-#   wdv_rate              — Annual WDV rate as decimal, e.g. 0.40 (40% p.a.)
-#   use_wdv               — Derived flag: 0.0 = SLM, 1.0 = WDV
+#   depreciation_rate   — Annual SLM rate as decimal, e.g. 0.05 (5% p.a.)
+#   depreciation_method — Enum: 'slm' or 'wdv' (informational; use_wdv drives logic)
+#   wdv_rate            — Annual WDV rate as decimal, e.g. 0.40 (40% p.a.)
+#   use_wdv             — Derived flag: 0.0 = SLM, 1.0 = WDV
 
 block_id: depreciation_block
 category: depreciation
 block_type: standard
-description: "Book depreciation on 95% of capex; SLM (default) or WDV selected via use_wdv flag"
+description: "Asset ledger depreciation on 95% of capex; SLM or WDV selected via use_wdv flag"
 
 inputs:
-  - name: capex_per_mw
-    source: assumption.capex_per_mw
-  - name: capacity_mw
-    source: assumption.capacity_mw
+  - name: total_project_capex
+    source: construction_block.total_project_capex
   - name: depreciation_rate
     source: assumption.depreciation_rate
   - name: depreciation_method
@@ -51,31 +45,45 @@ inputs:
 outputs:
   - name: depreciable_asset_base
     unit: INR_Lakhs
+  - name: asset_addition
+    unit: INR_Lakhs
+  - name: opening
+    unit: INR_Lakhs
   - name: slm_depreciation
     unit: INR_Lakhs
   - name: wdv_depreciation
     unit: INR_Lakhs
   - name: depreciation
     unit: INR_Lakhs
+  - name: closing
+    unit: INR_Lakhs
 
 body:
-  # Depreciable base = 95% of total capex (land at 5% excluded from depreciation)
+  # Depreciable base = 95% of hard capex (land at 5% excluded)
   - target: depreciable_asset_base
-    expr: "scalar_to_series(capex_per_mw * capacity_mw * 0.95)"
+    expr: "total_project_capex * 0.95"
 
-  # SLM: fixed quarterly charge during operations
+  # Asset placed in service at COD: addition fires only at the first operational period
+  # (is_operational - lag(is_operational, 1)) = 1 at COD, 0 in all other periods
+  - target: asset_addition
+    expr: "depreciable_asset_base * (is_operational - lag(is_operational, 1))"
+
+  # Opening balance: prior period closing plus any capitalised addition at COD
+  - target: opening
+    expr: "lag(closing, 1) + asset_addition"
+
+  # SLM: fixed quarterly charge on original depreciable base
   - target: slm_depreciation
     expr: "depreciable_asset_base * depreciation_rate / 4.0 * is_operational"
 
-  # WDV: declining balance approximated via escalate().
-  # Formula: base * (wdv_rate/4) * (1-wdv_rate)^((t-cod)/4)
-  # escalate(1,-wdv_rate) uses absolute period index (0-based), so multiply
-  # by 1/(1-wdv_rate) to offset the 4-quarter construction phase (cod at period 4).
-  - target: wdv_correction
-    expr: "scalar_to_series(1.0 / (1.0 - wdv_rate))"
+  # WDV: quarterly charge on opening balance (true declining balance)
   - target: wdv_depreciation
-    expr: "depreciable_asset_base * wdv_rate / 4.0 * escalate(1.0, -wdv_rate) * wdv_correction * is_operational"
+    expr: "opening * wdv_rate / 4.0 * is_operational"
 
   # Select method: use_wdv=0.0 → SLM, use_wdv=1.0 → WDV
   - target: depreciation
     expr: "slm_depreciation * (1.0 - use_wdv) + wdv_depreciation * use_wdv"
+
+  # Closing balance: opening minus depreciation charge
+  - target: closing
+    expr: "opening - depreciation"

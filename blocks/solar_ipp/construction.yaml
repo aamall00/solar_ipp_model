@@ -1,10 +1,19 @@
-# Construction Block — Capex drawdown schedule
+# Construction & Capex Block — Hard capex drawdown schedule and total project capex
 #
 # Distributes total project capex across construction periods according to
 # a user-supplied schedule (list that sums to 1.0 over construction quarters).
 # Operations-period values are zeroed by multiplying by phase.is_construction.
 #
 # total_project_capex (INR Lakhs) = capex_per_mw × capacity_mw
+#
+# Period capex including capitalised IDC:
+#   total_capex[t] = capex_drawdown[t] + idc_per_period[t]
+#
+# Both capex_drawdown and idc_per_period are already zeroed outside the
+# construction window by their respective masks, so no additional masking
+# is required here.
+#
+# cumulative_capex[t] at COD = total project cost (hard capex + capitalised IDC).
 #
 # Assumptions consumed:
 #   capex_per_mw    — Specific capex in INR Lakhs/MW, e.g. 450.0
@@ -14,7 +23,7 @@
 block_id: construction_block
 category: construction
 block_type: standard
-description: "Capex drawdown schedule during construction period"
+description: "Capex drawdown schedule and total period capex including IDC"
 
 inputs:
   - name: capex_per_mw
@@ -25,11 +34,15 @@ inputs:
     source: assumption.capex_schedule
   - name: is_construction
     source: phase.is_construction
+  - name: idc_per_period
+    source: idc_block.idc_per_period
 
 outputs:
   - name: total_project_capex
     unit: INR_Lakhs
   - name: capex_drawdown
+    unit: INR_Lakhs
+  - name: total_capex
     unit: INR_Lakhs
   - name: cumulative_capex
     unit: INR_Lakhs
@@ -39,10 +52,14 @@ body:
   - target: total_project_capex
     expr: "scalar_to_series(capex_per_mw * capacity_mw)"
 
-  # Quarterly capex drawdown — schedule fraction × total capex, masked to construction
+  # Quarterly hard capex drawdown — schedule fraction × total capex, masked to construction
   - target: capex_drawdown
     expr: "capex_per_mw * capacity_mw * capex_schedule * is_construction"
 
-  # Running cumulative capex (useful for IDC and DSRA sizing)
+  # Total period capex: hard capex + capitalised interest during construction
+  - target: total_capex
+    expr: "capex_drawdown + idc_per_period"
+
+  # Running cumulative capex including IDC — equals total project cost at COD
   - target: cumulative_capex
-    expr: "cumsum(capex_drawdown)"
+    expr: "cumsum(total_capex)"

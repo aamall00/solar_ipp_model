@@ -6,7 +6,8 @@
 #                opex_escalation rate p.a.  Quarterly = annual / 4.
 #
 #   insurance  — annual premium = total_project_capex × insurance_percent_of_capex.
-#                Fixed in nominal terms (percentage of fixed asset base).
+#                Fixed in nominal terms (percentage of fixed hard-capex asset base).
+#                Reads total_project_capex from construction_block (hard capex only).
 #                Quarterly = annual / 4.
 #
 #   land_lease — fixed annual land lease payment (INR Lakhs p.a.).
@@ -20,7 +21,6 @@
 #
 # Assumptions consumed:
 #   capacity_mw                — Installed capacity in MW, e.g. 100.0
-#   capex_per_mw               — Specific capex in INR Lakhs/MW, e.g. 450.0
 #   opex_per_mw_pa             — Base-year O&M in INR Lakhs/MW/year, e.g. 8.0
 #   opex_escalation            — Annual O&M escalation rate, e.g. 0.03 (3% p.a.)
 #   insurance_percent_of_capex — Annual insurance as fraction of capex, e.g. 0.005
@@ -32,10 +32,10 @@ block_type: standard
 description: "Quarterly O&M costs: base O&M escalated annually, plus insurance and land lease"
 
 inputs:
+  - name: total_project_capex
+    source: construction_block.total_project_capex
   - name: capacity_mw
     source: assumption.capacity_mw
-  - name: capex_per_mw
-    source: assumption.capex_per_mw
   - name: opex_per_mw_pa
     source: assumption.opex_per_mw_pa
   - name: opex_escalation
@@ -64,11 +64,9 @@ body:
   - target: base_opex
     expr: "opex_annual_base / 4.0 * escalate(1.0, opex_escalation) * is_operational"
 
-  # Insurance: annual premium = capex × rate; fixed in nominal terms (% of fixed asset base)
-  - target: capex_base
-    expr: "scalar_to_series(capex_per_mw * capacity_mw)"
+  # Insurance: annual premium = hard capex × rate; fixed in nominal terms
   - target: insurance
-    expr: "capex_base * insurance_percent_of_capex / 4.0 * is_operational"
+    expr: "total_project_capex * insurance_percent_of_capex / 4.0 * is_operational"
 
   # Land lease: fixed annual payment, paid quarterly
   - target: land_lease

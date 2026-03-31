@@ -59,9 +59,9 @@ EXPECTED_OUTPUTS = [
     "opex_block.base_opex",
     "cashflow_block.cfads",
     "cashflow_block.ebitda",
-    "tax_block.tax",
-    "returns_block.equity_cashflow",
-    "returns_block.project_cashflow",
+    "income_statement_block.tax",
+    "cashflow_block.equity_cashflow",
+    "cashflow_block.project_cashflow",
 ]
 
 # Plausible KPI ranges for a 100 MW Karnataka solar IPP.
@@ -282,7 +282,7 @@ class TestBaseRun:
 
     def test_equity_cashflow_has_negative_construction(self, base_results, compiled):
         cod = compiled.cod_period
-        eq_cf = base_results.variables.get("returns_block.equity_cashflow")
+        eq_cf = base_results.variables.get("cashflow_block.equity_cashflow")
         assert eq_cf is not None
         assert np.any(eq_cf[:cod] < 0), (
             "Equity cashflow should be negative (equity investment) during construction"

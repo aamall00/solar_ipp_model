@@ -11,10 +11,14 @@
 #   4. cash_sweep          — optional excess-cash sweep to accelerate debt prepayment
 #   5. equity_distribution — residual to equity holders (auto-computed as waterfall residual)
 #
+# equity_infusion:
+#   When revenue is insufficient to cover priority-1 + priority-2 obligations, equity
+#   must inject cash to make up the shortfall.  Computed explicitly as:
+#     equity_infusion[t] = max(0, total_opex + tax + total_ds − revenue)[t] × is_operational
+#   This ensures cashflow_block.equity_cashflow correctly accounts for cash calls.
+#
 # Cash sweep logic:
 #   cash_sweep[t] = (remaining_after_dsra[t]) × cash_sweep_rate × is_debt_outstanding[t]
-#   Implemented in target_expr using previously allocated bucket outputs (available in ctx
-#   by the time bucket 4 is evaluated by the executor).
 #   cash_sweep_rate = 0.0 (default) → all residual flows to equity immediately.
 #   cash_sweep_rate = 1.0 → full sweep; equity receives nothing until debt is retired.
 #
@@ -22,8 +26,7 @@
 #   Uses the incremental increase in required reserve level:
 #   max(0, dsra_required[t] − dsra_required[t−1])
 #   Period 1 funds the full initial reserve; subsequent periods fund only the increment.
-#   DSRA releases (when requirement falls) are NOT modelled here — they flow to equity
-#   via the residual in a full ledger model.
+#   DSRA releases flow to equity via the residual (handled by dsra_block).
 #
 # Assumptions consumed:
 #   cash_sweep_rate   — Fraction of post-DSRA excess cash swept to debt (0.0–1.0)
@@ -41,13 +44,15 @@ inputs:
   - name: total_opex
     source: opex_block.total_opex
   - name: tax
-    source: tax_block.tax
+    source: income_statement_block.tax
   - name: total_ds
     source: debt_service_block.total_debt_service
   - name: dsra_req
     source: dsra_block.dsra_required
   - name: cash_sweep_rate
     source: assumption.cash_sweep_rate
+  - name: is_operational
+    source: phase.is_operational
   - name: is_debt_outstanding
     source: phase.is_debt_outstanding
 
@@ -92,5 +97,11 @@ buckets:
     target_expr: "(available_cash - opex_payment - senior_debt_service - dsra_funding) * cash_sweep_rate * is_debt_outstanding"
     recipient: debt_service_block
 
-  # Priority 5: Equity distribution — implicit residual (executor stores as .residual
-  # and .equity_distribution automatically after all buckets are processed)
+  # Priority 5: Equity distribution — implicit residual (executor stores automatically
+  # after all buckets are processed)
+
+body:
+  # Equity infusion: cash shortfall that equity must cover when revenue < obligations.
+  # Floored at zero (positive means equity injects cash; zero means self-funding).
+  - target: equity_infusion
+    expr: "max_series(total_opex + tax + total_ds - revenue, scalar_to_series(0.0)) * is_operational"

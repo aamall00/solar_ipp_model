@@ -377,19 +377,24 @@ class DSLParser:
         if not cyclic_sccs:
             return  # No cycles — fully acyclic, ideal
 
-        # Collect the block_ids involved in each declared solve loop
-        # (the free variable and target give us the two ends of the loop)
+        # Collect the block_ids covered by each declared solve loop.
+        # For array_fixed_point loops, use the authoritative owned_blocks list.
+        # For other loop types, fall back to heuristic string scanning.
         declared_loop_blocks: List[Set[str]] = []
         for sl in solve_loops:
-            covered: Set[str] = set()
-            # free_variable is "assumption.X" or "block_id.output" → get block_id
-            fv = sl.free_variable
-            if not fv.startswith("assumption."):
-                covered.add(fv.split(".")[0])
-            # target_expression references other blocks (we do a simple string scan)
-            for block in graph.nodes:
-                if graph.nodes[block].get("type") == "block" and block in sl.target_expression:
-                    covered.add(block)
+            if sl.owned_blocks:
+                # Authoritative: owned_blocks explicitly declares the cycle members
+                covered: Set[str] = set(sl.owned_blocks)
+            else:
+                covered = set()
+                # free_variable is "assumption.X" or "block_id.output" → get block_id
+                fv = sl.free_variable
+                if not fv.startswith("assumption."):
+                    covered.add(fv.split(".")[0])
+                # target_expression references other blocks (simple string scan)
+                for block in graph.nodes:
+                    if graph.nodes[block].get("type") == "block" and block in sl.target_expression:
+                        covered.add(block)
             declared_loop_blocks.append(covered)
 
         for scc in cyclic_sccs:
