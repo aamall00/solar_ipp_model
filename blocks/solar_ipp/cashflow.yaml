@@ -1,8 +1,10 @@
 # Cashflow Block — Standard 3-section Cash Flow Statement
 #
-# FCFE = CFO + CFI + CFF  where CFF contains debt flows only.
-# Equity distributions and equity infusions are covenant / waterfall mechanics;
-# they are excluded from this statement to keep the three sections clean.
+# FCFE = CFO + CFI + CFF + DSRA
+#
+# CFF contains debt flows only (user convention).
+# DSRA is a lender-covenant restricted-cash account; it is shown as a
+# separate explicit section rather than inside CFF or CFO.
 #
 # ── SECTION 1: Cash Flow from Operations (CFO) ──────────────────────────────
 #   CFO = EBITDA − Tax − capex_during_ops
@@ -28,20 +30,40 @@
 # ── SECTION 3: Cash Flow from Financing (CFF — debt only) ────────────────────
 #   Inflows:  debt_drawdown during construction  (lender disburses)
 #   Outflows: total_debt_service during operations  (principal + interest repaid)
+#             cash_sweep during operations  (optional excess-cash debt prepayment)
+#
+#   cash_sweep is a voluntary debt prepayment controlled by cash_sweep_rate
+#   (assumption, default 0.0).  It is a real equity cash outflow that reduces
+#   the outstanding debt balance and thus future interest — it belongs in CFF,
+#   not CFO, because it is a financing decision, not an operating cost.
 #
 #   net_debt_cashflow (CFF subtotal):
-#     = debt_drawdown × is_construction − total_debt_service × is_operational
+#     = debt_drawdown × is_construction
+#       − total_debt_service × is_operational
+#       − cash_sweep × is_operational
 #
 #   equity_invested: equity's share of construction capex.
 #     = −(capex_drawdown − debt_drawdown) × is_construction
 #     Debt drawdown includes capitalised IDC; equity pays only the residual.
 #
-#   free_cashflow: post-debt-service operating cashflow.
+#   free_cashflow: post-debt-service operating cashflow (pre-sweep, pre-DSRA).
 #     = cfads − total_debt_service
 #
-#   equity_cashflow (FCFE = CFO + CFI + CFF):
-#     = project_cashflow + net_debt_cashflow
-#     = equity_invested + free_cashflow × is_operational
+# ── SECTION 4: DSRA (Debt Service Reserve Account) ───────────────────────────
+#   The DSRA is a lender-covenant restricted-cash account.  Cash movements are
+#   real equity cash flows that must be reflected in FCFE:
+#     Outflow: dsra_funding — cash swept from operating account into reserve
+#              (= waterfall bucket 3; incremental top-up each period)
+#     Inflow:  dsra_release — cash returned from reserve when requirement falls
+#              (full release at debt maturity when dsra_required → 0)
+#
+#   net_dsra_cashflow = dsra_release − dsra_funding
+#     Positive in periods where reserve unwinds; negative when reserve builds.
+#
+# ── FCFE ─────────────────────────────────────────────────────────────────────
+#   equity_cashflow (FCFE = CFO + CFI + CFF + DSRA):
+#     = project_cashflow + net_debt_cashflow + net_dsra_cashflow
+#     = equity_invested + (free_cashflow − cash_sweep) × is_operational + net_dsra_cashflow
 #   Used by the KPI layer for equity IRR and payback period.
 #
 # Naming conventions used by the executor (unchanged):
@@ -52,7 +74,7 @@
 block_id: cashflow_block
 category: cashflow
 block_type: standard
-description: "CFO/CFI/CFF(debt-only) cashflow statement; CFADS for sculpting solver; FCFF and FCFE for IRR/NPV"
+description: "CFO/CFI/CFF(debt)/DSRA cashflow statement; CFADS for sculpting solver; FCFF and FCFE for IRR/NPV"
 
 inputs:
   # ── CFO inputs ──────────────────────────────────────────────────────────────
@@ -78,6 +100,14 @@ inputs:
     source: debt_service_block.total_debt_service
   - name: debt_drawdown
     source: debt_service_block.drawdown
+  - name: cash_sweep
+    source: waterfall_block.cash_sweep
+
+  # ── DSRA inputs ──────────────────────────────────────────────────────────────
+  - name: dsra_funding
+    source: waterfall_block.dsra_funding
+  - name: dsra_release
+    source: dsra_block.release
 
 outputs:
   # CFO
@@ -91,12 +121,18 @@ outputs:
   - name: project_cashflow
     unit: INR_Lakhs
   # CFF
+  - name: cash_sweep
+    unit: INR_Lakhs
   - name: net_debt_cashflow
     unit: INR_Lakhs
   - name: equity_invested
     unit: INR_Lakhs
   - name: free_cashflow
     unit: INR_Lakhs
+  # DSRA
+  - name: net_dsra_cashflow
+    unit: INR_Lakhs
+  # FCFE
   - name: equity_cashflow
     unit: INR_Lakhs
 
@@ -127,11 +163,15 @@ body:
 
   # ── SECTION 3: Cash Flow from Financing (CFF — debt only) ────────────────────
 
+  # Cash sweep pass-through (declared output so it appears in reports alongside CFF)
+  - target: cash_sweep
+    expr: "cash_sweep"
+
   # Net debt cashflow (CFF subtotal):
   #   Construction: debt disbursed by lender (positive inflow)
-  #   Operations:   principal + interest repaid to lender (negative outflow)
+  #   Operations:   scheduled debt service + voluntary cash sweep (negative outflows)
   - target: net_debt_cashflow
-    expr: "debt_drawdown * is_construction - total_debt_service * is_operational"
+    expr: "debt_drawdown * is_construction - (total_debt_service + cash_sweep) * is_operational"
 
   # Equity invested during construction: hard capex not covered by debt drawdown.
   # Debt drawdown includes capitalised IDC; equity covers only the residual fraction.
@@ -143,10 +183,18 @@ body:
   - target: free_cashflow
     expr: "cfads - total_debt_service"
 
-  # Equity cashflow (FCFE = CFO + CFI + CFF = FCFF + net_debt_cashflow):
-  #   = project_cashflow + net_debt_cashflow
-  #   = equity_invested + free_cashflow × is_operational
-  #   Construction: equity cash outflow for capex not covered by debt
-  #   Operations:   post-debt-service free cashflow (pre-waterfall distribution)
+  # ── SECTION 4: DSRA ──────────────────────────────────────────────────────────
+
+  # Net DSRA cashflow (restricted-cash movement, operational periods only):
+  #   Negative when reserve builds (dsra_funding > dsra_release)
+  #   Positive when reserve unwinds (dsra_release > dsra_funding, e.g. at maturity)
+  - target: net_dsra_cashflow
+    expr: "(dsra_release - dsra_funding) * is_operational"
+
+  # ── FCFE ─────────────────────────────────────────────────────────────────────
+
+  # Equity cashflow (FCFE = CFO + CFI + CFF + DSRA):
+  #   = project_cashflow + net_debt_cashflow + net_dsra_cashflow
+  #   = equity_invested + (free_cashflow − cash_sweep) × is_operational + net_dsra_cashflow
   - target: equity_cashflow
-    expr: "equity_invested + free_cashflow * is_operational"
+    expr: "equity_invested + (free_cashflow - cash_sweep) * is_operational + net_dsra_cashflow"

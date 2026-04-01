@@ -1,17 +1,18 @@
 # DSRA Block — Debt Service Reserve Account requirement and ledger
 #
 # Section 1 — Requirement
-#   dsra_required[t] = lag(total_debt_service, 1) × (dsra_months / 3.0) × is_debt_outstanding[t]
+#   dsra_required[t] = total_debt_service[t] × (dsra_months / 3.0) × is_debt_outstanding[t]
 #
-#   lag(·,1) uses the previous period's debt service as a proxy for the upcoming
-#   period (conservative approximation). dsra_months / 3.0 converts months to
-#   quarters (3 months per quarter).
+#   Uses the current period's debt service so that the reserve is funded from the
+#   first operational period (Q1OPS).  dsra_months / 3.0 converts months to quarters
+#   (3 months per quarter).  With equal-principal repayment DS declines over time, so
+#   the target will reduce after each payment and small releases will flow back to equity.
 #
 # Section 2 — Ledger
 #   Tracks the DSRA balance period by period.  The waterfall always funds the full
 #   top-up, so closing_balance == dsra_required at all times (no shortfall).
 #
-#   opening_balance[t] = lag(dsra_required, 1)[t] × is_operational[t]
+#   opening_balance[t] = lag(dsra_required, 1)[t] × is_operational[t]   (= 0 at Q1OPS)
 #   top_up[t]          = max(0, dsra_required[t] − opening_balance[t])
 #   release[t]         = max(0, opening_balance[t] − dsra_required[t])
 #   closing_balance[t] = dsra_required[t]   (always funded to target)
@@ -53,9 +54,10 @@ outputs:
 body:
   # --- Section 1: Requirement ---
 
-  # Forward-looking reserve target: prior period DS scaled to coverage window
+  # Reserve target: current-period DS scaled to coverage window.
+  # Using current (not lagged) DS ensures the DSRA is funded at Q1OPS.
   - target: dsra_required
-    expr: "lag(total_debt_service, 1) * (dsra_months / 3.0) * is_debt_outstanding"
+    expr: "total_debt_service * (dsra_months / 3.0) * is_debt_outstanding"
 
   # --- Section 2: Ledger ---
 

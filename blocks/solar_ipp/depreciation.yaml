@@ -7,7 +7,9 @@
 #   closing[t]         = opening[t] - depreciation[t]
 #
 # SLM (straight-line method):
-#   charge = depreciable_base × depreciation_rate / 4   (constant during operations)
+#   charge = min(opening, depreciable_base × depreciation_rate / 4)
+#   Capped at the opening book value so cumulative depreciation never exceeds asset base.
+#   At 5% p.a. the asset is fully written off in 20 years (80 quarters); charge = 0 after.
 #
 # WDV (written-down value / declining balance):
 #   charge = opening[t] × wdv_rate / 4                  (true declining balance on opening)
@@ -72,9 +74,10 @@ body:
   - target: opening
     expr: "lag(closing, 1) + asset_addition"
 
-  # SLM: fixed quarterly charge on original depreciable base
+  # SLM: flat quarterly charge, capped at remaining book value so the asset
+  # is never depreciated below zero (fully written off after 1/rate years)
   - target: slm_depreciation
-    expr: "depreciable_asset_base * depreciation_rate / 4.0 * is_operational"
+    expr: "min_series(opening, depreciable_asset_base * depreciation_rate / 4.0) * is_operational"
 
   # WDV: quarterly charge on opening balance (true declining balance)
   - target: wdv_depreciation
@@ -84,6 +87,6 @@ body:
   - target: depreciation
     expr: "slm_depreciation * (1.0 - use_wdv) + wdv_depreciation * use_wdv"
 
-  # Closing balance: opening minus depreciation charge
+  # Closing balance: floored at zero (should be exactly 0 after full write-off)
   - target: closing
-    expr: "opening - depreciation"
+    expr: "max_series(opening - depreciation, scalar_to_series(0.0)) * is_operational"

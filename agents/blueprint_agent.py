@@ -60,23 +60,8 @@ from dsl.types import ModelDefinition, ValidationResult
 _BLOCKS_DIR = pathlib.Path(__file__).parent.parent / "blocks" / "solar_ipp"
 _TEMPLATE_PATH = pathlib.Path(__file__).parent.parent / "dsl" / "templates" / "solar_ipp_base.yaml"
 
-# Expected block IDs in load order (topological)
-_BLOCK_ORDER = [
-    "generation_block",
-    "revenue_block",
-    "construction_block",
-    "debt_sizing_block",
-    "debt_drawdown_block",
-    "idc_block",
-    "debt_service_block",
-    "opex_block",
-    "dsra_block",
-    "depreciation_block",
-    "tax_block",
-    "cashflow_block",
-    "waterfall_block",
-    "returns_block",
-]
+# Block order is derived dynamically from the YAML library at runtime.
+# _BLOCK_ORDER is intentionally removed — see _build_blocks_and_wiring().
 
 # ---------------------------------------------------------------------------
 # Claude prompts
@@ -351,16 +336,11 @@ class BlueprintAgent:
         """
         library = self._load_block_library()
 
-        # Assemble blocks in topological order; fall back to alphabetical for any extras
-        ordered_blocks: List[Dict[str, Any]] = []
-        for bid in _BLOCK_ORDER:
-            if bid in library:
-                ordered_blocks.append(self._configure_block(library[bid], a))
-
-        # Any blocks in the library not in _BLOCK_ORDER (future extensions)
-        for bid, block in library.items():
-            if bid not in _BLOCK_ORDER:
-                ordered_blocks.append(self._configure_block(block, a))
+        # Assemble blocks in library scan order (executor uses dependency graph for
+        # actual execution order, so declaration order here is informational only).
+        ordered_blocks: List[Dict[str, Any]] = [
+            self._configure_block(block, a) for block in library.values()
+        ]
 
         solve_loops = self._determine_solve_loops(a)
 
@@ -418,21 +398,31 @@ class BlueprintAgent:
             "target_value":      dscr_target,
             "tolerance":         1e-6,
             "max_iterations":    50,
+            # Executor reads these from loop.parameters — no assumption names hardcoded
+            # in the solver. Fallbacks in the executor match these defaults.
+            "parameters": {
+                "interest_rate_var":    "assumption.interest_rate",
+                "moratorium_var":       "assumption.moratorium_periods",
+                "debt_sizing_mode_var": "assumption.debt_sizing_mode",
+                "output_principal":     "principal_repayment",
+                "output_interest":      "interest_payment",
+                "output_balance":       "outstanding_debt_balance",
+                "output_ds":            "total_debt_service",
+            },
         })
 
         # IDC array fixed-point — always present (IDC always capitalised into debt).
-        # The circular dependency (debt_sizing_block reads idc_block.idc_total;
-        # idc_block reads debt_drawdown_block.cumulative_drawdown; drawdown uses
-        # debt_sizing_block.debt_amount) is resolved generically by re-evaluating
-        # owned_blocks in declared order until idc_per_period converges.
-        # Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085; converges in ~3–5 iters.
+        # The circular dependency (construction_block total_capex uses idc_per_period;
+        # debt_service_block drawdown uses total_capex; idc_block uses cumulative_drawdown)
+        # is resolved generically by re-evaluating owned_blocks in declared order until
+        # idc_per_period converges. Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085.
         loops.append({
             "loop_id":           "idc_capitalisation",
             "type":              "array_fixed_point",
             "free_variable":     "idc_block.idc_per_period",
             "target_expression": "idc_block.idc_per_period",
             "target_value":      0.0,
-            "owned_blocks":      ["debt_sizing_block", "debt_drawdown_block", "idc_block"],
+            "owned_blocks":      ["construction_block", "debt_service_block", "idc_block"],
         })
 
         return loops

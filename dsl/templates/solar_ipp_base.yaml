@@ -158,10 +158,11 @@ assumption_schema:
         max: 0.02
 
     - name: land_lease_lakhs_pa
-      # Annual land lease payment. Set to 0 if land is owned.
+      # Annual land lease payment (INR Lakhs/year). Typical Karnataka solar:
+      # ~500 acres × INR 8–10k/acre/year ≈ 40–50 Lakhs p.a. Set to 0 for owned land.
       type: scalar
       unit: INR_Lakhs_per_year
-      value: 0.0
+      value: 50.0
       constraints:
         min: 0.0
 
@@ -408,9 +409,15 @@ model_wiring:
     - from: dsra_block.dsra_required
       to: waterfall_block.dsra_req
 
-    # Cashflow CFF input (debt drawdown for equity_invested and net_debt_cashflow)
+    # Cashflow CFF inputs (debt drawdown, cash sweep, DSRA movements for FCFE)
     - from: debt_service_block.drawdown
       to: cashflow_block.debt_drawdown
+    - from: waterfall_block.cash_sweep
+      to: cashflow_block.cash_sweep
+    - from: waterfall_block.dsra_funding
+      to: cashflow_block.dsra_funding
+    - from: dsra_block.release
+      to: cashflow_block.dsra_release
 
   output_reports:
     income_statement:
@@ -432,6 +439,9 @@ model_wiring:
       - construction_block.cumulative_capex
       - debt_service_block.drawdown
       - debt_service_block.cumulative_drawdown
+      - debt_service_block.debt_amount
+      - debt_service_block.total_project_cost
+      - debt_service_block.equity_amount
 
     cash_flow_statement:
       - cashflow_block.ebitda
@@ -439,9 +449,12 @@ model_wiring:
       - cashflow_block.cfads
       - cashflow_block.project_cashflow
       - cashflow_block.net_debt_cashflow
+      - cashflow_block.cash_sweep
       - cashflow_block.equity_invested
       - cashflow_block.free_cashflow
+      - cashflow_block.net_dsra_cashflow
       - cashflow_block.equity_cashflow
+      - waterfall_block.equity_distribution
 
     debt_schedule:
       - debt_service_block.outstanding_debt_balance
@@ -457,5 +470,6 @@ model_wiring:
     returns_summary:
       - cashflow_block.equity_invested
       - cashflow_block.net_debt_cashflow
+      - cashflow_block.net_dsra_cashflow
       - cashflow_block.equity_cashflow
       - cashflow_block.project_cashflow

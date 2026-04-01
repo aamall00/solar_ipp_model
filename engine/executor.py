@@ -28,6 +28,7 @@ Critical constraints (from spec)
 from __future__ import annotations
 
 import copy
+import re
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
@@ -538,23 +539,55 @@ class ModelExecutor:
         # Execute body steps
         n = compiled.n_periods
         if block.body:
-            for step in block.body:
-                result = ev.evaluate(step.expr, ctx)
-                # Always store intermediate results as (n_periods,) arrays so
-                # subsequent steps see consistent shapes
-                result_arr = np.asarray(result, dtype=np.float64)
-                if result_arr.ndim == 0:
-                    result_arr = np.full(n, float(result_arr))
-                ctx[step.target] = result_arr
+            # Detect forward references: a body step references a variable that
+            # is the target of a *later* step (recurrence pattern, e.g. opening = lag(closing,1)).
+            # When detected, switch to period-by-period sequential evaluation so that
+            # lag() always reads from already-correct array positions.
+            body_targets = [step.target for step in block.body]
+            needs_sequential = False
+            for i, step in enumerate(block.body):
+                future_set = set(body_targets[i + 1:])
+                # Word-boundary scan: is any future target name referenced in this expression?
+                if any(re.search(r'\b' + re.escape(ft) + r'\b', step.expr) for ft in future_set):
+                    needs_sequential = True
+                    break
 
-                # Audit for declared outputs only (avoids noise from intermediates)
+            if needs_sequential:
+                # Pre-initialise every body target to zeros so forward references via lag()
+                # see a valid (zero-padded) array from the very first period.
+                for tgt in body_targets:
+                    ctx[tgt] = np.zeros(n)
+
+                # Step through each period; evaluate full expressions and take index t.
+                # Because ctx arrays are updated in-place after each period, lag() reads
+                # correct history for all t' < t.
+                for t in range(n):
+                    for step in block.body:
+                        result = ev.evaluate(step.expr, ctx)
+                        result_arr = np.asarray(result, dtype=np.float64)
+                        val_t = float(result_arr) if result_arr.ndim == 0 else float(result_arr[t])
+                        ctx[step.target][t] = val_t
+            else:
+                # Standard array evaluation — all body steps evaluate on the full period axis.
+                for step in block.body:
+                    result = ev.evaluate(step.expr, ctx)
+                    result_arr = np.asarray(result, dtype=np.float64)
+                    if result_arr.ndim == 0:
+                        result_arr = np.full(n, float(result_arr))
+                    ctx[step.target] = result_arr
+
+            # Audit declared outputs (works for both array and sequential paths)
+            for step in block.body:
                 for out in block.outputs:
                     if out.name == step.target:
+                        arr = np.asarray(ctx[step.target], dtype=np.float64)
+                        if arr.ndim == 0:
+                            arr = np.full(n, float(arr))
                         audit.append(AuditEntry(
                             variable=f"{block.block_id}.{out.name}",
                             expression=step.expr,
                             block_id=block.block_id,
-                            values=result_arr.copy(),
+                            values=arr.copy(),
                         ))
 
         # Store declared outputs into namespace — always as (n_periods,) arrays
@@ -625,16 +658,22 @@ class ModelExecutor:
         # Surplus (remaining > 0): distributed to equity.
         residual = np.maximum(remaining, 0.0)
 
-        namespace[f"{block.block_id}.equity_infusion"] = equity_infusion
-        namespace[f"{block.block_id}.residual"] = residual
+        # equity_distribution is always written — it is the fundamental waterfall output.
         namespace[f"{block.block_id}.equity_distribution"] = residual
 
-        audit.append(AuditEntry(
-            variable=f"{block.block_id}.equity_infusion",
-            expression="max(-(available_cash - sum_of_bucket_targets), 0)",
-            block_id=block.block_id,
-            values=equity_infusion.copy(),
-        ))
+        # equity_infusion and residual are written only if declared in block outputs,
+        # keeping the namespace clean when these are not needed downstream.
+        declared_output_names = {out.name for out in block.outputs}
+        if "equity_infusion" in declared_output_names:
+            namespace[f"{block.block_id}.equity_infusion"] = equity_infusion
+            audit.append(AuditEntry(
+                variable=f"{block.block_id}.equity_infusion",
+                expression="max(-(available_cash - sum_of_bucket_targets), 0)",
+                block_id=block.block_id,
+                values=equity_infusion.copy(),
+            ))
+        if "residual" in declared_output_names:
+            namespace[f"{block.block_id}.residual"] = residual
 
         # Also store declared outputs that were computed as bucket allocations
         for out in block.outputs:
@@ -882,14 +921,27 @@ class ModelExecutor:
         cod = compiled.cod_period
         mat = compiled.debt_maturity_period
 
-        rate_pa = self._get_scalar(namespace, "assumption.interest_rate", 0.0)
-        r_per_period = (1.0 + rate_pa) ** (1.0 / ppy) - 1.0
-        moratorium = int(self._get_scalar(namespace, "assumption.moratorium_periods", 0))
-        dscr_target = self._get_scalar(namespace, "assumption.dscr_target", loop.target_value)
+        # All assumption names and output variable names are read from loop.parameters
+        # (declared in YAML) with hardcoded strings only as fallbacks for backward compat.
+        p = loop.parameters
+        interest_rate_var    = p.get("interest_rate_var",    "assumption.interest_rate")
+        moratorium_var       = p.get("moratorium_var",        "assumption.moratorium_periods")
+        debt_sizing_mode_var = p.get("debt_sizing_mode_var",  "assumption.debt_sizing_mode")
+        out_principal        = p.get("output_principal",      "principal_repayment")
+        out_interest         = p.get("output_interest",       "interest_payment")
+        out_balance          = p.get("output_balance",        "outstanding_debt_balance")
+        out_ds               = p.get("output_ds",             "total_debt_service")
+
         target_block_id = loop.free_variable.split(".")[0]
+        debt_amount_key = p.get("debt_amount_var", f"{target_block_id}.debt_amount")
+
+        rate_pa = self._get_scalar(namespace, interest_rate_var, 0.0)
+        r_per_period = (1.0 + rate_pa) ** (1.0 / ppy) - 1.0
+        moratorium = int(self._get_scalar(namespace, moratorium_var, 0))
+        dscr_target = loop.target_value  # YAML target_value is authoritative
 
         # Mode switch: 0.0 = cost_based, 1.0 = cfads_based
-        cfads_based = self._get_scalar(namespace, "assumption.debt_sizing_mode", 0.0) >= 0.5
+        cfads_based = self._get_scalar(namespace, debt_sizing_mode_var, 0.0) >= 0.5
 
         repay_start = cod + moratorium
         repay_end = mat + 1   # exclusive
@@ -905,7 +957,7 @@ class ModelExecutor:
             # ----------------------------------------------------------
             total_debt = self._find_scalar(
                 namespace,
-                ["debt_sizing_block.debt_amount", "assumption.total_debt"],
+                [debt_amount_key, "assumption.total_debt"],
                 0.0,
             )
 
@@ -930,18 +982,18 @@ class ModelExecutor:
 
             total_ds = interest_arr + principal
 
-            # Write schedule into namespace
-            namespace[f"{target_block_id}.principal_repayment"] = principal
-            namespace[f"{target_block_id}.interest_payment"] = interest_arr
-            namespace[f"{target_block_id}.outstanding_debt_balance"] = balance_arr
-            namespace[f"{target_block_id}.total_debt_service"] = total_ds
+            # Write schedule into namespace using YAML-declared output names
+            namespace[f"{target_block_id}.{out_principal}"] = principal
+            namespace[f"{target_block_id}.{out_interest}"]  = interest_arr
+            namespace[f"{target_block_id}.{out_balance}"]   = balance_arr
+            namespace[f"{target_block_id}.{out_ds}"]        = total_ds
 
             # Run subgraph once with actual DS → computes CFADS, tax, waterfall
             _tmp_audit: List[AuditEntry] = []
             for step in subgraph:
                 if step.kind == "block":
                     self._execute_block(step.block, compiled, namespace, _tmp_audit)
-            cfads = self._find_array(namespace, ["cashflow_block.cfads", "cfads"], n)
+            cfads = np.asarray(namespace.get(loop.target_expression, np.zeros(n)), dtype=np.float64)
 
             # Check for DSCR breaches and negative free cashflow
             breach_periods = []
@@ -978,10 +1030,10 @@ class ModelExecutor:
             ))
 
             for name, arr in [
-                ("principal_repayment", principal),
-                ("interest_payment", interest_arr),
-                ("outstanding_debt_balance", balance_arr),
-                ("total_debt_service", total_ds),
+                (out_principal, principal),
+                (out_interest,  interest_arr),
+                (out_balance,   balance_arr),
+                (out_ds,        total_ds),
             ]:
                 audit.append(AuditEntry(
                     variable=f"{target_block_id}.{name}",
@@ -1014,7 +1066,7 @@ class ModelExecutor:
             for step in subgraph:
                 if step.kind == "block":
                     self._execute_block(step.block, compiled, namespace, _tmp_audit)
-            cfads = self._find_array(namespace, ["cashflow_block.cfads", "cfads"], n)
+            cfads = np.asarray(namespace.get(loop.target_expression, np.zeros(n)), dtype=np.float64)
 
             result: SculptingResult
             outer_converged = False
@@ -1028,7 +1080,7 @@ class ModelExecutor:
                 total_debt = float(np.dot(cfads_repay / dscr_target, pv_factors))
 
                 # Update namespace so downstream blocks see the derived debt amount
-                namespace["debt_sizing_block.debt_amount"] = np.full(n, total_debt)
+                namespace[debt_amount_key] = np.full(n, total_debt)
 
                 result = sculpting_solver(
                     cfads=cfads,
@@ -1043,18 +1095,18 @@ class ModelExecutor:
                     max_iterations=loop.max_iterations,
                 )
 
-                # Write sculpted DS → namespace so subgraph sees actual interest
-                namespace[f"{target_block_id}.principal_repayment"] = result.principal_repayment
-                namespace[f"{target_block_id}.interest_payment"] = result.interest_payment
-                namespace[f"{target_block_id}.outstanding_debt_balance"] = result.outstanding_balance
-                namespace[f"{target_block_id}.total_debt_service"] = result.total_debt_service
+                # Write sculpted DS → namespace using YAML-declared output names
+                namespace[f"{target_block_id}.{out_principal}"] = result.principal_repayment
+                namespace[f"{target_block_id}.{out_interest}"]  = result.interest_payment
+                namespace[f"{target_block_id}.{out_balance}"]   = result.outstanding_balance
+                namespace[f"{target_block_id}.{out_ds}"]        = result.total_debt_service
 
                 # Re-run subgraph → updated tax (with actual interest) → updated CFADS
                 _tmp_audit = []
                 for step in subgraph:
                     if step.kind == "block":
                         self._execute_block(step.block, compiled, namespace, _tmp_audit)
-                cfads_new = self._find_array(namespace, ["cashflow_block.cfads", "cfads"], n)
+                cfads_new = np.asarray(namespace.get(loop.target_expression, np.zeros(n)), dtype=np.float64)
 
                 # Convergence: relative L2 change in CFADS over repayment window
                 cfads_norm = float(np.linalg.norm(cfads[repay_start:repay_end]))
@@ -1083,10 +1135,10 @@ class ModelExecutor:
             ))
 
             for name, arr in [
-                ("principal_repayment", result.principal_repayment),
-                ("interest_payment", result.interest_payment),
-                ("outstanding_debt_balance", result.outstanding_balance),
-                ("total_debt_service", result.total_debt_service),
+                (out_principal, result.principal_repayment),
+                (out_interest,  result.interest_payment),
+                (out_balance,   result.outstanding_balance),
+                (out_ds,        result.total_debt_service),
             ]:
                 audit.append(AuditEntry(
                     variable=f"{target_block_id}.{name}",

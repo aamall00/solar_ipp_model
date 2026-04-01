@@ -643,7 +643,7 @@ def _sheet_cashflow(wb, results, compiled, sheet_prefix: str = "") -> None:
         {"type": "blank"},
         {"type": "header", "title": "Construction Financing"},
         {"type": "row", "label": "Capex Drawdown",          "array": _get("construction_block.capex_drawdown"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
-        {"type": "row", "label": "Debt Drawdown",           "array": _get("debt_drawdown_block.drawdown"),          "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Debt Drawdown",           "array": _get("debt_service_block.drawdown"),           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "IDC  (interest during construction)", "array": _get("idc_block.idc_per_period"),  "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Cumulative Capex",        "array": _get("construction_block.cumulative_capex"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS},
     ]
@@ -672,7 +672,7 @@ def _sheet_debt_schedule(wb, results, compiled, sheet_prefix: str = "") -> None:
         {"type": "row", "label": "Cumulative Drawdown", "array": _get("debt_service_block.cumulative_drawdown"), "unit": "INR Lakhs", "fmt": FMT_LAKHS},
         {"type": "blank"},
         {"type": "header", "title": "Debt Service Schedule"},
-        {"type": "row", "label": "Opening Balance",     "array": np.roll(bal, 1),                             "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Opening Balance",     "array": _get("debt_service_block.opening"),          "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Interest Charge",     "array": _get("debt_service_block.interest_payment"),  "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Principal Repayment", "array": _get("debt_service_block.principal_repayment"),"unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
         {"type": "row", "label": "Total Debt Service",  "array": ds,                                           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
@@ -687,6 +687,129 @@ def _sheet_debt_schedule(wb, results, compiled, sheet_prefix: str = "") -> None:
         {"type": "row", "label": "DSRA Funding",        "array": _get("waterfall_block.dsra_funding"),        "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
     ]
     _write_schedule_sheet(wb, f"{sheet_prefix}Debt Schedule", sections, compiled, n)
+
+
+def _sheet_project_model(wb, results, compiled, sheet_prefix: str = "") -> None:
+    """
+    Combined 'Project Model' sheet: Income Statement → Cash Flow → Debt Schedule
+    (including full DSRA ledger) in a single scrollable schedule.
+    Replaces the three separate sheets.
+    """
+    v   = results.variables
+    n   = compiled.n_periods
+
+    def _get(key):
+        return v.get(key, np.zeros(n))
+
+    ds   = _get("debt_service_block.total_debt_service")
+    bal  = _get("debt_service_block.outstanding_debt_balance")
+    mask = bal > 0
+
+    sections = [
+        # ── INCOME STATEMENT ────────────────────────────────────────────────
+        {"type": "header", "title": "INCOME STATEMENT", "fill": C_HEADER_DARK},
+        {"type": "blank"},
+        {"type": "header", "title": "Revenue"},
+        {"type": "row", "label": "Net Generation",      "array": _get("generation_block.net_generation_kwh"),
+         "unit": "kWh", "fmt": FMT_KWH, "indent": 1},
+        {"type": "row", "label": "PPA Revenue",          "array": _get("revenue_block.revenue"),
+         "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "blank"},
+        {"type": "header", "title": "Operating Costs"},
+        {"type": "row", "label": "Base O&M",             "array": _get("opex_block.base_opex"),      "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Insurance",            "array": _get("opex_block.insurance"),      "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Land Lease",           "array": _get("opex_block.land_lease"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Total OPEX",           "array": _get("opex_block.total_opex"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "blank"},
+        {"type": "row", "label": "EBITDA",               "array": _get("cashflow_block.ebitda"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "blank"},
+        {"type": "header", "title": "Below-the-Line (P&L)"},
+        {"type": "row", "label": "Depreciation",         "array": _get("depreciation_block.depreciation"),       "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "EBIT",                 "array": _get("income_statement_block.ebit"),            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "row", "label": "Interest Expense",     "array": _get("debt_service_block.interest_payment"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "PBT",                  "array": _get("income_statement_block.pbt"),             "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "row", "label": "Tax",                  "array": _get("income_statement_block.tax"),             "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "PAT  (PBT − Tax)",     "array": _get("income_statement_block.pbt") - _get("income_statement_block.tax"),
+         "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True, "label_fill": C_SECTION_ALT},
+        {"type": "blank"},
+        {"type": "header", "title": "EBITDA Margin"},
+        {"type": "row", "label": "EBITDA Margin %",
+         "array": np.where(_get("revenue_block.revenue") > 0,
+                           _get("cashflow_block.ebitda") / _get("revenue_block.revenue"), np.nan),
+         "unit": "%", "fmt": FMT_PCT1, "indent": 1},
+
+        # ── CASH FLOW STATEMENT ──────────────────────────────────────────────
+        {"type": "blank"},
+        {"type": "header", "title": "CASH FLOW STATEMENT", "fill": C_HEADER_DARK},
+        {"type": "blank"},
+        {"type": "header", "title": "Operating Cash Flow"},
+        {"type": "row", "label": "EBITDA",                   "array": _get("cashflow_block.ebitda"),          "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "row", "label": "Tax Paid",                 "array": -_get("income_statement_block.tax"),                 "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Maintenance Capex",        "array": -_get("cashflow_block.capex_during_ops"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "CFADS  (pre-debt-svc)",    "array": _get("cashflow_block.cfads"),           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "blank"},
+        {"type": "header", "title": "Debt Service"},
+        {"type": "row", "label": "Interest",                 "array": _get("debt_service_block.interest_payment"),    "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Principal Repayment",      "array": _get("debt_service_block.principal_repayment"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Total Debt Service",       "array": ds,                                     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "dscr", "label": "DSCR",
+         "cfads": _get("cashflow_block.cfads"), "ds": ds, "mask": mask},
+        {"type": "blank"},
+        {"type": "header", "title": "Free & Equity Cashflows"},
+        {"type": "row", "label": "Free Cashflow  (post-DS)", "array": _get("cashflow_block.free_cashflow"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS},
+        {"type": "row", "label": "DSRA Funding",             "array": _get("waterfall_block.dsra_funding"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Cash Sweep",               "array": _get("waterfall_block.cash_sweep"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Equity Distribution",      "array": _get("waterfall_block.equity_distribution"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "blank"},
+        {"type": "header", "title": "IRR Cashflows"},
+        {"type": "row", "label": "Equity Invested  (−ve)",   "array": _get("cashflow_block.equity_invested"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Equity Cashflow",          "array": _get("cashflow_block.equity_cashflow"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "row", "label": "Project Cashflow",         "array": _get("cashflow_block.project_cashflow"),"unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "blank"},
+        {"type": "header", "title": "Construction Financing"},
+        {"type": "row", "label": "Capex Drawdown",           "array": _get("construction_block.capex_drawdown"),     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Debt Drawdown",            "array": _get("debt_service_block.drawdown"),           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "IDC  (interest during construction)", "array": _get("idc_block.idc_per_period"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Cumulative Capex",         "array": _get("construction_block.cumulative_capex"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS},
+
+        # ── DEBT SCHEDULE ────────────────────────────────────────────────────
+        {"type": "blank"},
+        {"type": "header", "title": "DEBT SCHEDULE", "fill": C_HEADER_DARK},
+        {"type": "blank"},
+        {"type": "header", "title": "Debt Sizing"},
+        {"type": "row", "label": "Total Project Cost",       "array": _get("debt_service_block.total_project_cost"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "row", "label": "Debt Amount",              "array": _get("debt_service_block.debt_amount"),        "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Equity Amount",            "array": _get("debt_service_block.equity_amount"),      "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "blank"},
+        {"type": "header", "title": "Construction Drawdown"},
+        {"type": "row", "label": "Debt Drawdown",            "array": _get("debt_service_block.drawdown"),           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Cumulative Drawdown",      "array": _get("debt_service_block.cumulative_drawdown"), "unit": "INR Lakhs", "fmt": FMT_LAKHS},
+        {"type": "blank"},
+        {"type": "header", "title": "Debt Service Schedule"},
+        {"type": "row", "label": "Opening Balance",          "array": _get("debt_service_block.opening"),            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Interest Charge",          "array": _get("debt_service_block.interest_payment"),   "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Principal Repayment",      "array": _get("debt_service_block.principal_repayment"), "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Total Debt Service",       "array": ds,                                            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "row", "label": "Closing Balance",          "array": bal,                                           "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+        {"type": "blank"},
+        {"type": "dscr", "label": "DSCR",
+         "cfads": _get("cashflow_block.cfads"), "ds": ds, "mask": mask},
+        {"type": "blank"},
+        {"type": "header", "title": "Debt Service Reserve Account"},
+        {"type": "row", "label": "DSRA Required",            "array": _get("dsra_block.dsra_required"),              "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True},
+        {"type": "row", "label": "Opening Balance",          "array": _get("dsra_block.opening_balance"),            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Top-Up  (Funding)",        "array": _get("dsra_block.top_up"),                     "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Release",                  "array": _get("dsra_block.release"),                    "unit": "INR Lakhs", "fmt": FMT_LAKHS, "indent": 1},
+        {"type": "row", "label": "Closing Balance",          "array": _get("dsra_block.closing_balance"),            "unit": "INR Lakhs", "fmt": FMT_LAKHS, "bold": True,
+         "label_fill": C_SECTION_ALT},
+    ]
+    _write_schedule_sheet(wb, f"{sheet_prefix}Project Model", sections, compiled, n)
 
 
 def _sheet_generation(wb, results, compiled, sheet_prefix: str = "") -> None:
@@ -1118,11 +1241,7 @@ def export_to_excel(
     n_periods = compiled.n_periods
 
     _sheet_cover(wb, results, compiled, scenario_results)
-    _sheet_income_statement(wb, results, compiled)
-    _sheet_cashflow(wb, results, compiled)
-    _sheet_debt_schedule(wb, results, compiled)
-    _sheet_generation(wb, results, compiled)
-    _sheet_waterfall(wb, results, compiled)
+    _sheet_project_model(wb, results, compiled)
 
     if sensitivity_results is not None:
         _sheet_sensitivity(wb, sensitivity_results)
@@ -1149,14 +1268,10 @@ def export_portfolio_to_excel(
     Sheet layout
     ------------
     Portfolio Summary  — KPIs for all assets side by side
-    [SPV-1] Cover      — project summary for asset 1
-    [SPV-1] Income Statement
-    [SPV-1] Cash Flow
-    [SPV-1] Debt Schedule
-    [SPV-1] Generation & Revenue
-    [SPV-1] Waterfall
+    [SPV-1] Cover          — project summary for asset 1
+    [SPV-1] Project Model  — combined Income Statement / Cash Flow / Debt Schedule
     [SPV-1] Assumptions
-    [SPV-2] Cover      — project summary for asset 2
+    [SPV-2] Cover          — project summary for asset 2
     ... (repeated for each asset)
 
     Parameters
@@ -1183,11 +1298,7 @@ def export_portfolio_to_excel(
         safe_spv = ar.spec.spv_name.replace("[", "(").replace("]", ")")
         prefix = f"({safe_spv}) "
         _sheet_cover(wb, ar.model_results, ar.compiled, None, sheet_prefix=prefix)
-        _sheet_income_statement(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
-        _sheet_cashflow(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
-        _sheet_debt_schedule(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
-        _sheet_generation(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
-        _sheet_waterfall(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        _sheet_project_model(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
         _sheet_assumptions(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
 
     wb.save(path)

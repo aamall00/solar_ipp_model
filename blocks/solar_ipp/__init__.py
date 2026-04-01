@@ -18,23 +18,9 @@ from dsl.types import CalculationBlock
 
 _BLOCK_DIR = Path(__file__).parent
 
-# Ordered list of block filenames (defines evaluation order documentation)
-BLOCK_FILES = [
-    "generation.yaml",
-    "revenue.yaml",
-    "construction.yaml",
-    "idc.yaml",
-    "debt_sizing.yaml",
-    "debt_drawdown.yaml",
-    "debt_service.yaml",
-    "opex.yaml",
-    "dsra.yaml",
-    "depreciation.yaml",
-    "tax.yaml",
-    "cashflow.yaml",
-    "waterfall.yaml",
-    "returns.yaml",
-]
+# Block filenames — derived from YAML files on disk so the list stays in sync
+# with the block library without manual maintenance.
+BLOCK_FILES: list[str] = sorted(p.name for p in _BLOCK_DIR.glob("*.yaml"))
 
 
 def load_block_raw(filename: str) -> dict:
@@ -78,7 +64,7 @@ def load_block(filename: str) -> CalculationBlock:
 
 def load_all_blocks_raw() -> Dict[str, dict]:
     """
-    Load all 14 solar IPP block YAML files as raw dicts.
+    Load all solar IPP block YAML files as raw dicts.
     Use this when blocks need to be mutated before assembly (e.g. in BlueprintAgent).
 
     Returns
@@ -94,7 +80,7 @@ def load_all_blocks_raw() -> Dict[str, dict]:
 
 def load_all_blocks() -> Dict[str, CalculationBlock]:
     """
-    Load all 14 solar IPP block YAML files.
+    Load all solar IPP block YAML files.
 
     Returns
     -------

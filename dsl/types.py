@@ -359,6 +359,15 @@ class SolveLoop(BaseModel):
             "in-place. Blocks are excluded from the main evaluation plan."
         ),
     )
+    parameters: Dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Solver-specific parameters declared in YAML rather than hardcoded in the "
+            "executor. Keys and semantics are solver-type specific. For sculpting loops: "
+            "interest_rate_var, moratorium_var, debt_sizing_mode_var, debt_amount_var, "
+            "output_principal, output_interest, output_balance, output_ds."
+        ),
+    )
 
     @field_validator("free_variable")
     @classmethod
