@@ -1329,6 +1329,16 @@ class ModelExecutor:
         fm_owned: set = set()
         fp_loops: List[tuple] = []  # list of (insert_idx, SolveLoop)
 
+        def _loop_depends_on_owned_blocks(sl: SolveLoop, owned_blocks: set[str]) -> bool:
+            refs = [sl.free_variable, sl.target_expression, *sl.parameters.values()]
+            for ref in refs:
+                if not isinstance(ref, str):
+                    continue
+                for block_id in owned_blocks:
+                    if f"{block_id}." in ref:
+                        return True
+            return False
+
         for sl in solve_loops:
             if sl.type == SolveLoopType.array_fixed_point:
                 owned_set = set(sl.owned_blocks)
@@ -1378,7 +1388,7 @@ class ModelExecutor:
                         if sl.loop_id in handled_loop_ids:
                             continue
                         fv_block = sl.free_variable.split(".")[0]
-                        if fv_block in fp_owned_set:
+                        if fv_block in fp_owned_set or _loop_depends_on_owned_blocks(sl, fp_owned_set):
                             post_owned = [
                                 b for b in sorted_blocks if b.block_id not in fp_owned_set
                             ]
@@ -1399,6 +1409,12 @@ class ModelExecutor:
             # Block-level loops: insert after the block that owns the free variable
             for sl in solve_loops:
                 if sl.loop_id in handled_loop_ids:
+                    continue
+                if any(
+                    _loop_depends_on_owned_blocks(sl, set(fp_loop.owned_blocks))
+                    for _, fp_loop in fp_loops
+                    if fp_loop.loop_id not in handled_loop_ids
+                ):
                     continue
                 fv_block = sl.free_variable.split(".")[0]
                 if fv_block == block.block_id:
