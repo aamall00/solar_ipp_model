@@ -13,8 +13,7 @@ not hardcoded in the agent.  The agent's job is to:
   2. _configure_block_inputs()   — wire assumption sources
   3. _build_skeleton()           — compute periods/milestones from assumptions
   4. _build_assumption_schema()  — map filled_assumptions → assumption_schema entries
-  5. _determine_solve_loops()    — sculpting loop only when debt_sizing_mode=1;
-                                   IDC array_fixed_point loop always present
+  5. _determine_solve_loops()    — load declarative solve-loop config from YAML
   6. _units_check()              — basic units algebra sanity (no AI)
   7. _claude_structure_review()  — Claude flags structural anomalies (optional)
   8. Parse with DSLParser         — validate structure
@@ -26,7 +25,8 @@ Claude roles
     (e.g. very high leverage + low CUF, IDC capitalisation with short tenor)
   - _explain(): plain-English rationale for the project sponsor
 
-Claude NEVER computes arithmetic.  All structural decisions are Python.
+Claude NEVER computes arithmetic. Block, assumption-schema, and solve-loop
+declarations are YAML-driven; Python assembles and validates the model instance.
 
 Usage
 -----
@@ -47,10 +47,14 @@ import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
+import numpy as np
 import yaml
 
-from agents.assumption_agent import IngestionResult, _CANONICAL
+from agents.assumption_agent import IngestionResult
+from dsl.assumption_schema_library import load_assumption_schema_entries
+from dsl.expression import ExpressionEvaluator
 from dsl.parser import load_model_from_dict
+from dsl.solve_loop_library import load_solve_loop_entries
 from dsl.types import ModelDefinition, ValidationResult
 
 # ---------------------------------------------------------------------------
@@ -58,7 +62,6 @@ from dsl.types import ModelDefinition, ValidationResult
 # ---------------------------------------------------------------------------
 
 _BLOCKS_DIR = pathlib.Path(__file__).parent.parent / "blocks" / "solar_ipp"
-
 # Block order is derived dynamically from the YAML library at runtime.
 # _BLOCK_ORDER is intentionally removed — see _build_blocks_and_wiring().
 
@@ -103,6 +106,8 @@ class BlueprintAgent:
         self.model = model
         self.client = client or anthropic.Anthropic()
         self._block_library: Optional[Dict[str, Dict[str, Any]]] = None
+        self._assumption_schema_library: Optional[List[Dict[str, Any]]] = None
+        self._solve_loop_library: Optional[List[Dict[str, Any]]] = None
 
     # ------------------------------------------------------------------
     # Public API
@@ -184,6 +189,28 @@ class BlueprintAgent:
         self._block_library = load_all_blocks_raw()
         return self._block_library
 
+    def _load_assumption_schema_library(self) -> List[Dict[str, Any]]:
+        """
+        Load the asset-specific assumption schema template from YAML.
+        The raw entries may contain assembly-only metadata such as include_when,
+        exclude_when, and formula-based default_rule strings.
+        """
+        if self._assumption_schema_library is not None:
+            return self._assumption_schema_library
+        self._assumption_schema_library = load_assumption_schema_entries(self.asset_type)
+        return self._assumption_schema_library
+
+    def _load_solve_loop_library(self) -> List[Dict[str, Any]]:
+        """
+        Load the asset-specific solve-loop declarations from YAML.
+        Raw entries may contain assembly-only metadata such as include_when,
+        exclude_when, and target_value_rule expressions.
+        """
+        if self._solve_loop_library is not None:
+            return self._solve_loop_library
+        self._solve_loop_library = load_solve_loop_entries(self.asset_type)
+        return self._solve_loop_library
+
     # ------------------------------------------------------------------
     # Private: model dict construction (pure Python)
     # ------------------------------------------------------------------
@@ -232,117 +259,74 @@ class BlueprintAgent:
         }
 
     def _build_assumption_schema(self, a: Dict[str, Any]) -> Dict[str, Any]:
-        entries = []
+        import copy
 
-        def _entry(name: str, atype: str, unit: str, value: Any,
-                   cmin: Optional[float] = None, cmax: Optional[float] = None,
-                   vary: bool = False, range_pct: float = 0.10,
-                   dist: str = "triangular") -> Dict[str, Any]:
-            e: Dict[str, Any] = {"name": name, "type": atype, "unit": unit, "value": value}
-            if cmin is not None or cmax is not None:
-                e["constraints"] = {}
-                if cmin is not None:
-                    e["constraints"]["min"] = cmin
-                if cmax is not None:
-                    e["constraints"]["max"] = cmax
-            if vary:
-                e["sensitivity"] = {
-                    "vary": True, "range_pct": range_pct, "distribution": dist,
-                }
-            return e
+        entries: List[Dict[str, Any]] = []
+        resolved_values: Dict[str, Any] = dict(a)
 
-        # --- Generation (asset-type specific) ---
-        entries.append(_entry("capacity_mw", "scalar", "MW",
-                               float(a.get("capacity_mw", 100.0))))
-        if self.asset_type == "wind":
-            cf_default = self._asset_meta["cuf_or_cf_default"]
-            entries.append(_entry("capacity_factor", "scalar", "ratio",
-                                   float(a.get("capacity_factor", cf_default)),
-                                   cmin=0.15, cmax=0.55, vary=True, range_pct=0.10))
-            entries.append(_entry("availability_factor", "scalar", "ratio",
-                                   float(a.get("availability_factor", 0.95)),
-                                   cmin=0.80, cmax=0.99))
-        else:
-            entries.append(_entry("cuf", "scalar", "ratio",
-                                   float(a.get("cuf", 0.22)),
-                                   cmin=0.10, cmax=0.40, vary=True, range_pct=0.10))
-            entries.append(_entry("degradation_rate", "scalar", "per_year",
-                                   float(a.get("degradation_rate", 0.005)),
-                                   vary=True, range_pct=0.50))
-        entries.append(_entry("auxiliary_consumption", "scalar", "ratio",
-                               float(a.get("auxiliary_consumption", 0.005))))
+        for raw_entry in copy.deepcopy(self._load_assumption_schema_library()):
+            include_when = raw_entry.pop("include_when", None)
+            exclude_when = raw_entry.pop("exclude_when", None)
 
-        # --- Revenue ---
-        entries.append(_entry("tariff", "scalar", "INR_per_kWh",
-                               float(a.get("tariff", 2.65)),
-                               cmin=0.0, vary=True, range_pct=0.10))
-        entries.append(_entry("tariff_escalation", "scalar", "per_year",
-                               float(a.get("tariff_escalation", 0.0))))
+            if include_when and not self._evaluate_schema_condition(include_when, resolved_values):
+                continue
+            if exclude_when and self._evaluate_schema_condition(exclude_when, resolved_values):
+                continue
 
-        # --- Capex ---
-        capex_default = self._asset_meta["capex_per_mw_default"]
-        entries.append(_entry("capex_per_mw", "scalar", "INR_Lakhs_per_MW",
-                               float(a.get("capex_per_mw", capex_default)),
-                               vary=True, range_pct=0.10))
-        schedule = list(a.get("capex_schedule", [0.25, 0.25, 0.25, 0.25]))
-        entries.append(_entry("capex_schedule", "time_series", "fraction", schedule))
+            name = raw_entry["name"]
+            if name in a:
+                value = a[name]
+            elif raw_entry.get("value") is not None:
+                value = raw_entry["value"]
+            elif raw_entry.get("default_rule"):
+                value = self._evaluate_schema_expression(
+                    raw_entry["default_rule"],
+                    resolved_values,
+                )
+            else:
+                value = None
 
-        # --- O&M ---
-        opex_default = self._asset_meta["opex_per_mw_pa_default"]
-        entries.append(_entry("opex_per_mw_pa", "scalar", "INR_Lakhs_per_MW_per_year",
-                               float(a.get("opex_per_mw_pa", opex_default)),
-                               vary=True, range_pct=0.20))
-        entries.append(_entry("opex_escalation", "scalar", "per_year",
-                               float(a.get("opex_escalation", 0.03))))
-
-        # --- Debt ---
-        entries.append(_entry("debt_pct", "scalar", "ratio",
-                               float(a.get("debt_pct", 0.70)),
-                               cmin=0.30, cmax=0.85))
-        entries.append(_entry("interest_rate", "scalar", "per_year",
-                               float(a.get("interest_rate", 0.0975)),
-                               cmin=0.04, cmax=0.25, vary=True, range_pct=0.15))
-        entries.append(_entry("moratorium_periods", "scalar", "quarters",
-                               float(a.get("moratorium_periods", 0.0))))
-        _debt_tenor_q = int(round(float(a.get("debt_tenor_years", 18.0)) * 4))
-        _moratorium_q = int(float(a.get("moratorium_periods", 0.0)))
-        _repay_periods = max(1, _debt_tenor_q - _moratorium_q)
-        entries.append(_entry("debt_repayment_periods", "scalar", "quarters",
-                               float(_repay_periods),
-                               cmin=4.0, cmax=100.0))
-        entries.append(_entry("dscr_target", "scalar", "ratio",
-                               float(a.get("dscr_target", 1.20)),
-                               cmin=1.0, cmax=2.5))
-        entries.append(_entry("debt_sizing_mode", "scalar", "flag",
-                               float(a.get("debt_sizing_mode", 0.0))))
-        entries.append(_entry("dsra_months", "scalar", "months",
-                               float(a.get("dsra_months", 6.0))))
-
-
-        # --- Tax ---
-        entries.append(_entry("tax_rate", "scalar", "ratio",
-                               float(a.get("tax_rate", 0.25)),
-                               cmin=0.0, cmax=0.40))
-        entries.append(_entry("depreciation_rate", "scalar", "per_year",
-                               float(a.get("depreciation_rate", 0.05))))
-
-        # --- Equity ---
-        entries.append(_entry("equity_irr_target", "scalar", "per_year",
-                               float(a.get("equity_irr_target", 0.14))))
-
-        # --- Optional features ---
-        entries.append(_entry("has_revenue_subsidy", "scalar", "flag",
-                               float(a.get("has_revenue_subsidy", 0.0))))
-
-        # Revenue subsidy parameters — only materialise when has_revenue_subsidy = 1
-        if float(a.get("has_revenue_subsidy", 0.0)) == 1.0:
-            entries.append(_entry("subsidy_per_kwh", "scalar", "INR_per_kWh",
-                                   float(a.get("subsidy_per_kwh", 0.0)),
-                                   cmin=0.0, cmax=5.0))
-            entries.append(_entry("subsidy_escalation", "scalar", "per_year",
-                                   float(a.get("subsidy_escalation", 0.0))))
+            raw_entry["value"] = value
+            raw_entry.pop("default_rule", None)
+            entries.append(raw_entry)
+            resolved_values[name] = value
 
         return {"assumptions": entries}
+
+    def _evaluate_schema_expression(
+        self,
+        expr: str,
+        values: Dict[str, Any],
+    ) -> Any:
+        """
+        Evaluate a scalar schema expression against the currently resolved
+        assumption values. Expressions use the same safe DSL evaluator as block
+        bodies but run on a trivial one-period context.
+        """
+        cleaned = expr.strip()
+        if cleaned.startswith("="):
+            cleaned = cleaned[1:].strip()
+
+        evaluator = ExpressionEvaluator(n_periods=1, periods_per_year=1)
+        result = evaluator.evaluate(cleaned, values)
+        if isinstance(result, np.ndarray):
+            if result.size != 1:
+                raise ValueError(
+                    f"Schema expression '{expr}' produced a non-scalar array with "
+                    f"shape {result.shape}"
+                )
+            return result.reshape(-1)[0].item()
+        if isinstance(result, np.generic):
+            return result.item()
+        return result
+
+    def _evaluate_schema_condition(
+        self,
+        expr: str,
+        values: Dict[str, Any],
+    ) -> bool:
+        result = self._evaluate_schema_expression(expr, values)
+        return bool(result)
 
     def _select_blocks(
         self, library: Dict[str, Dict[str, Any]], a: Dict[str, Any]
@@ -350,26 +334,41 @@ class BlueprintAgent:
         """
         Return the subset of blocks to include for this model instance.
 
-        Each block YAML may carry a ``wiring.optional: true`` flag.  When a block
-        is optional, its ``wiring.exclude_when`` field specifies the condition
-        (evaluated against the assumption dict) under which it is dropped.
-
-        Current exclusion rules
-        -----------------------
-        dsra_block         : excluded when dsra_months == 0
-        revenue_subsidy_block : excluded when has_revenue_subsidy != 1
+        Optional blocks are controlled declaratively from block YAML metadata.
+        When ``wiring.optional`` is true, ``wiring.include_when`` and
+        ``wiring.exclude_when`` are evaluated against the assumption dict.
         """
-        excluded: set = set()
+        included: Dict[str, Dict[str, Any]] = {}
 
-        dsra_months = float(a.get("dsra_months", 6.0))
-        if dsra_months == 0.0:
-            excluded.add("dsra_block")
+        for block_id, block in library.items():
+            wiring = block.get("wiring", {}) or {}
+            if not wiring.get("optional", False):
+                included[block_id] = block
+                continue
 
-        has_subsidy = float(a.get("has_revenue_subsidy", 0.0))
-        if has_subsidy != 1.0:
-            excluded.add("revenue_subsidy_block")
+            include_block = True
+            try:
+                include_when = wiring.get("include_when")
+                if include_when:
+                    include_block = self._evaluate_schema_condition(
+                        str(include_when), a
+                    )
 
-        return {bid: blk for bid, blk in library.items() if bid not in excluded}
+                exclude_when = wiring.get("exclude_when")
+                if include_block and exclude_when:
+                    include_block = not self._evaluate_schema_condition(
+                        str(exclude_when), a
+                    )
+            except Exception as exc:
+                raise ValueError(
+                    f"Failed to evaluate optional wiring rules for block "
+                    f"'{block_id}'"
+                ) from exc
+
+            if include_block:
+                included[block_id] = block
+
+        return included
 
     def _build_wiring_from_included(
         self,
@@ -436,7 +435,7 @@ class BlueprintAgent:
         ]
 
         wiring = self._build_wiring_from_included(included, excluded_ids)
-        solve_loops = self._determine_solve_loops(a)
+        solve_loops = self._determine_solve_loops(a, set(included.keys()))
 
         calculation_blocks = {
             "blocks":      ordered_blocks,
@@ -455,8 +454,10 @@ class BlueprintAgent:
         import copy
         b = copy.deepcopy(block)
 
-        # Verify assumption.* sources exist in the validated assumption set
-        all_assumption_names = set(_CANONICAL.keys())
+        # Verify assumption.* sources exist in the asset schema library
+        all_assumption_names = {
+            entry["name"] for entry in self._load_assumption_schema_library()
+        }
         for inp in b.get("inputs", []):
             src: str = inp.get("source", "")
             if src.startswith("assumption."):
@@ -467,58 +468,52 @@ class BlueprintAgent:
 
         return b
 
-    def _determine_solve_loops(self, a: Dict[str, Any]) -> List[Dict[str, Any]]:
+    def _determine_solve_loops(
+        self,
+        a: Dict[str, Any],
+        included_block_ids: set[str],
+    ) -> List[Dict[str, Any]]:
         """
-        Conditional solve loop configuration:
-          - Sculpting loop: ONLY when debt_sizing_mode = 1 (CFADS-sculpted).
-          - IDC array_fixed_point: always present (IDC is always capitalised).
+        Assemble solve loops declaratively from the YAML loop library.
 
-        Note: when debt_sizing_mode = 0 (cost-based), the sculpting loop is
-        still required for the executor to compute equal-principal debt service.
-        If you need cost-based debt service, keep debt_sizing_mode = 0 but the
-        sculpting loop must still be present.  This method includes the loop
-        for both modes because the executor's _run_sculpting handles both.
+        Assembly-only metadata supported in the raw YAML entries:
+          - include_when / exclude_when: boolean expressions over assumptions
+          - target_value_rule: scalar expression evaluated over assumptions
         """
+        import copy
+
         loops: List[Dict[str, Any]] = []
+        for raw_loop in self._load_solve_loop_library():
+            loop = copy.deepcopy(raw_loop)
 
-        # Sculpting loop — always needed for debt service computation.
-        # debt_sizing_mode controls the algorithm inside the executor.
-        dscr_target = float(a.get("dscr_target", 1.20))
-        loops.append({
-            "loop_id":           "debt_service_sculpting",
-            "type":              "sculpting",
-            "free_variable":     "debt_service_block.total_debt_service",
-            "target_expression": "cashflow_block.cfads",
-            "target_value":      dscr_target,
-            "tolerance":         1e-6,
-            "max_iterations":    50,
-            # Executor reads these from loop.parameters — no assumption names hardcoded
-            # in the solver. Fallbacks in the executor match these defaults.
-            "parameters": {
-                "interest_rate_var":    "assumption.interest_rate",
-                "moratorium_var":       "assumption.moratorium_periods",
-                "debt_sizing_mode_var": "assumption.debt_sizing_mode",
-                "debt_amount_var":      "debt_drawdown_block.debt_amount",
-                "output_principal":     "principal_repayment",
-                "output_interest":      "interest_payment",
-                "output_balance":       "outstanding_debt_balance",
-                "output_ds":            "total_debt_service",
-            },
-        })
+            include_when = loop.pop("include_when", None)
+            exclude_when = loop.pop("exclude_when", None)
+            if include_when and not self._evaluate_schema_condition(
+                str(include_when), a
+            ):
+                continue
+            if exclude_when and self._evaluate_schema_condition(str(exclude_when), a):
+                continue
 
-        # IDC array fixed-point — always present (IDC always capitalised into debt).
-        # The circular dependency (construction_block total_capex uses idc_per_period;
-        # debt_drawdown_block drawdown uses total_capex; idc_block uses cumulative_drawdown)
-        # is resolved generically by re-evaluating owned_blocks in declared order until
-        # idc_per_period converges. Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085.
-        loops.append({
-            "loop_id":           "idc_capitalisation",
-            "type":              "array_fixed_point",
-            "free_variable":     "idc_block.idc_per_period",
-            "target_expression": "idc_block.idc_per_period",
-            "target_value":      0.0,
-            "owned_blocks":      ["construction_block", "debt_drawdown_block", "idc_block"],
-        })
+            target_value_rule = loop.pop("target_value_rule", None)
+            if target_value_rule is not None:
+                loop["target_value"] = float(
+                    self._evaluate_schema_expression(str(target_value_rule), a)
+                )
+
+            owned_blocks = loop.get("owned_blocks", []) or []
+            missing_owned_blocks = [
+                block_id
+                for block_id in owned_blocks
+                if block_id not in included_block_ids
+            ]
+            if missing_owned_blocks:
+                raise ValueError(
+                    f"Solve loop '{loop.get('loop_id', '?')}' references excluded "
+                    f"or unknown owned_blocks: {missing_owned_blocks}"
+                )
+
+            loops.append(loop)
 
         return loops
 

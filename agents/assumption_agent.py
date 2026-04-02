@@ -37,12 +37,14 @@ Usage
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 import anthropic
 
+from dsl.assumption_schema_library import load_assumption_schema_entries
 from dsl.types import ValidationResult, ValidationWarning
 
 # ---------------------------------------------------------------------------
@@ -461,6 +463,64 @@ _SCHEMA_BY_ASSET: Dict[str, tuple] = {
     "wind":  (_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS),
 }
 
+
+def _canonical_from_yaml(
+    asset_type: str,
+    metadata_overlay: Dict[str, Dict[str, Any]],
+) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
+    """
+    Rebuild the ingestion schema from the shared YAML assumption schema.
+
+    YAML is the source of truth for assumption names, types, units, defaults,
+    and constraints. The existing Python metadata remains as an overlay for
+    LLM extraction niceties like aliases and richer descriptions.
+    """
+    canonical: Dict[str, Dict[str, Any]] = {}
+    required: List[str] = []
+
+    for entry in load_assumption_schema_entries(asset_type):
+        if entry.get("ingestion_exclude"):
+            continue
+        if entry.get("default_rule"):
+            continue
+
+        name = entry["name"]
+        overlay = metadata_overlay.get(name, {})
+        meta: Dict[str, Any] = {
+            "type": entry["type"],
+            "unit": entry.get("unit", overlay.get("unit", "")),
+            "default": copy.deepcopy(entry.get("value")),
+            "aliases": copy.deepcopy(overlay.get("aliases", [])),
+            "constraints": copy.deepcopy(entry.get("constraints", overlay.get("constraints", {}))),
+            "description": overlay.get("description", name),
+        }
+        if "sensitivity" in entry:
+            meta["sensitivity"] = copy.deepcopy(entry["sensitivity"])
+        elif "sensitivity" in overlay:
+            meta["sensitivity"] = copy.deepcopy(overlay["sensitivity"])
+        if "enum_values" in entry:
+            meta["enum_values"] = copy.deepcopy(entry["enum_values"])
+        elif "enum_values" in overlay:
+            meta["enum_values"] = copy.deepcopy(overlay["enum_values"])
+
+        canonical[name] = meta
+        if meta["default"] is None:
+            required.append(name)
+
+    return canonical, required
+
+
+_LEGACY_SOLAR_CANONICAL = _CANONICAL
+_LEGACY_WIND_CANONICAL = _WIND_CANONICAL
+
+_CANONICAL, _REQUIRED_ASSUMPTIONS = _canonical_from_yaml("solar", _LEGACY_SOLAR_CANONICAL)
+_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS = _canonical_from_yaml("wind", _LEGACY_WIND_CANONICAL)
+
+_SCHEMA_BY_ASSET = {
+    "solar": (_CANONICAL, _REQUIRED_ASSUMPTIONS),
+    "wind":  (_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS),
+}
+
 # ---------------------------------------------------------------------------
 # Assumption contract — the explicit bridge between Layer 3 and Layer 4
 # ---------------------------------------------------------------------------
@@ -675,7 +735,7 @@ class AssumptionAgent:
                     f"[aliases: {', '.join(meta.get('aliases', [])[:4])}]"
                 )
             }
-            if meta["type"] == "schedule":
+            if meta["type"] in ("schedule", "time_series"):
                 prop["type"] = "array"
                 prop["items"] = {"type": "number"}
             elif meta["type"] == "enum":

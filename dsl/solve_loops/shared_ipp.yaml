@@ -1,0 +1,27 @@
+solve_loops:
+  - loop_id: debt_service_sculpting
+    type: sculpting
+    free_variable: debt_service_block.total_debt_service
+    target_expression: cashflow_block.cfads
+    target_value_rule: dscr_target
+    tolerance: 0.000001
+    max_iterations: 50
+    parameters:
+      interest_rate_var: assumption.interest_rate
+      moratorium_var: assumption.moratorium_periods
+      debt_sizing_mode_var: assumption.debt_sizing_mode
+      debt_amount_var: debt_drawdown_block.debt_amount
+      output_principal: principal_repayment
+      output_interest: interest_payment
+      output_balance: outstanding_debt_balance
+      output_ds: total_debt_service
+
+  - loop_id: idc_capitalisation
+    type: array_fixed_point
+    free_variable: idc_block.idc_per_period
+    target_expression: idc_block.idc_per_period
+    target_value: 0.0
+    owned_blocks:
+      - construction_block
+      - debt_drawdown_block
+      - idc_block

@@ -248,7 +248,7 @@ class ExpressionEvaluator:
             return self._period_index.copy()
         if name in context:
             val = context[name]
-            if isinstance(val, (int, float, bool)):
+            if isinstance(val, (int, float, bool, str)):
                 return val
             return np.asarray(val, dtype=np.float64)
         raise UndefinedVariableError(

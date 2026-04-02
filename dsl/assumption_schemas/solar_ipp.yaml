@@ -1,0 +1,276 @@
+assumptions:
+  - name: capacity_mw
+    type: scalar
+    unit: MW
+    value: 100.0
+    constraints:
+      min: 1.0
+      max: 5000.0
+
+  - name: cuf
+    type: scalar
+    unit: ratio
+    value: 0.22
+    constraints:
+      min: 0.10
+      max: 0.40
+    sensitivity:
+      vary: true
+      range_pct: 0.10
+      distribution: triangular
+
+  - name: degradation_rate
+    type: scalar
+    unit: per_year
+    value: 0.005
+    constraints:
+      min: 0.0
+      max: 0.02
+    sensitivity:
+      vary: true
+      range_pct: 0.50
+      distribution: triangular
+
+  - name: auxiliary_consumption
+    type: scalar
+    unit: ratio
+    value: 0.005
+    constraints:
+      min: 0.0
+      max: 0.05
+
+  - name: tariff
+    type: scalar
+    unit: INR_per_kWh
+    value: 2.65
+    constraints:
+      min: 0.50
+      max: 15.0
+    sensitivity:
+      vary: true
+      range_pct: 0.10
+      distribution: triangular
+
+  - name: tariff_escalation
+    type: scalar
+    unit: per_year
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 0.10
+
+  - name: ppa_tenor_years
+    type: scalar
+    unit: years
+    value: 25.0
+    constraints:
+      min: 10.0
+      max: 35.0
+
+  - name: capex_per_mw
+    type: scalar
+    unit: INR_Lakhs_per_MW
+    value: 450.0
+    constraints:
+      min: 150.0
+      max: 1000.0
+    sensitivity:
+      vary: true
+      range_pct: 0.10
+      distribution: triangular
+
+  - name: capex_schedule
+    type: time_series
+    unit: fraction
+    value: [0.25, 0.25, 0.25, 0.25]
+
+  - name: opex_per_mw_pa
+    type: scalar
+    unit: INR_Lakhs_per_MW_per_year
+    value: 8.0
+    constraints:
+      min: 1.0
+      max: 50.0
+    sensitivity:
+      vary: true
+      range_pct: 0.20
+      distribution: triangular
+
+  - name: opex_escalation
+    type: scalar
+    unit: per_year
+    value: 0.03
+    constraints:
+      min: 0.0
+      max: 0.10
+
+  - name: debt_pct
+    type: scalar
+    unit: ratio
+    value: 0.70
+    constraints:
+      min: 0.30
+      max: 0.85
+
+  - name: interest_rate
+    type: scalar
+    unit: per_year
+    value: 0.0975
+    constraints:
+      min: 0.04
+      max: 0.25
+    sensitivity:
+      vary: true
+      range_pct: 0.15
+      distribution: triangular
+
+  - name: debt_tenor_years
+    type: scalar
+    unit: years
+    value: 18.0
+    constraints:
+      min: 5.0
+      max: 25.0
+
+  - name: moratorium_periods
+    type: scalar
+    unit: quarters
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 8.0
+
+  - name: debt_repayment_periods
+    type: scalar
+    unit: quarters
+    default_rule: "= max(1, round(debt_tenor_years * 4) - moratorium_periods)"
+    constraints:
+      min: 4.0
+      max: 100.0
+
+  - name: dscr_target
+    type: scalar
+    unit: ratio
+    value: 1.20
+    constraints:
+      min: 1.0
+      max: 2.5
+
+  - name: debt_sizing_mode
+    type: scalar
+    unit: flag
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 1.0
+
+  - name: dsra_months
+    type: scalar
+    unit: months
+    value: 6.0
+    constraints:
+      min: 0.0
+      max: 12.0
+
+  - name: cash_sweep_rate
+    type: scalar
+    unit: ratio
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 1.0
+
+  - name: tax_rate
+    type: scalar
+    unit: ratio
+    value: 0.25
+    constraints:
+      min: 0.0
+      max: 0.40
+
+  - name: depreciation_rate
+    type: scalar
+    unit: per_year
+    value: 0.05
+    constraints:
+      min: 0.02
+      max: 0.40
+
+  - name: insurance_percent_of_capex
+    type: scalar
+    unit: ratio
+    value: 0.005
+    constraints:
+      min: 0.0
+      max: 0.02
+
+  - name: land_lease_lakhs_pa
+    type: scalar
+    unit: INR_Lakhs_per_year
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 500.0
+
+  - name: maintenance_capex_pct
+    type: scalar
+    unit: ratio
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 0.10
+
+  - name: depreciation_method
+    type: enum
+    unit: string
+    value: slm
+
+  - name: wdv_rate
+    type: scalar
+    unit: per_year
+    value: 0.40
+    constraints:
+      min: 0.05
+      max: 0.80
+
+  - name: use_wdv
+    type: scalar
+    unit: flag
+    default_rule: "= 1.0 * (depreciation_method == 'wdv')"
+    constraints:
+      min: 0.0
+      max: 1.0
+
+  - name: equity_irr_target
+    type: scalar
+    unit: per_year
+    value: 0.14
+    constraints:
+      min: 0.08
+      max: 0.35
+
+  - name: has_revenue_subsidy
+    type: scalar
+    unit: flag
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 1.0
+
+  - name: subsidy_per_kwh
+    type: scalar
+    unit: INR_per_kWh
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 5.0
+    include_when: "has_revenue_subsidy == 1.0"
+
+  - name: subsidy_escalation
+    type: scalar
+    unit: per_year
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 0.10
+    include_when: "has_revenue_subsidy == 1.0"
