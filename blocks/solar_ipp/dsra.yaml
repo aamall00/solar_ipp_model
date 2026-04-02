@@ -76,3 +76,16 @@ body:
   # Closing balance: always funded to target by waterfall convention
   - target: closing_balance
     expr: "dsra_required"
+
+# dsra_block is OPTIONAL — excluded when dsra_months = 0.
+# It owns all connections referencing it so they drop cleanly when excluded.
+wiring:
+  optional: true
+  exclude_when: "dsra_months == 0"
+  output_reports:
+    debt_schedule:
+      - dsra_block.dsra_required
+      - dsra_block.opening_balance
+      - dsra_block.top_up
+      - dsra_block.release
+      - dsra_block.closing_balance

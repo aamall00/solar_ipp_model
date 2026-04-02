@@ -58,7 +58,6 @@ from dsl.types import ModelDefinition, ValidationResult
 # ---------------------------------------------------------------------------
 
 _BLOCKS_DIR = pathlib.Path(__file__).parent.parent / "blocks" / "solar_ipp"
-_TEMPLATE_PATH = pathlib.Path(__file__).parent.parent / "dsl" / "templates" / "solar_ipp_base.yaml"
 
 # Block order is derived dynamically from the YAML library at runtime.
 # _BLOCK_ORDER is intentionally removed — see _build_blocks_and_wiring().
@@ -305,6 +304,12 @@ class BlueprintAgent:
                                cmin=0.04, cmax=0.25, vary=True, range_pct=0.15))
         entries.append(_entry("moratorium_periods", "scalar", "quarters",
                                float(a.get("moratorium_periods", 0.0))))
+        _debt_tenor_q = int(round(float(a.get("debt_tenor_years", 18.0)) * 4))
+        _moratorium_q = int(float(a.get("moratorium_periods", 0.0)))
+        _repay_periods = max(1, _debt_tenor_q - _moratorium_q)
+        entries.append(_entry("debt_repayment_periods", "scalar", "quarters",
+                               float(_repay_periods),
+                               cmin=4.0, cmax=100.0))
         entries.append(_entry("dscr_target", "scalar", "ratio",
                                float(a.get("dscr_target", 1.20)),
                                cmin=1.0, cmax=2.5))
@@ -325,30 +330,119 @@ class BlueprintAgent:
         entries.append(_entry("equity_irr_target", "scalar", "per_year",
                                float(a.get("equity_irr_target", 0.14))))
 
+        # --- Optional features ---
+        entries.append(_entry("has_revenue_subsidy", "scalar", "flag",
+                               float(a.get("has_revenue_subsidy", 0.0))))
+
+        # Revenue subsidy parameters — only materialise when has_revenue_subsidy = 1
+        if float(a.get("has_revenue_subsidy", 0.0)) == 1.0:
+            entries.append(_entry("subsidy_per_kwh", "scalar", "INR_per_kWh",
+                                   float(a.get("subsidy_per_kwh", 0.0)),
+                                   cmin=0.0, cmax=5.0))
+            entries.append(_entry("subsidy_escalation", "scalar", "per_year",
+                                   float(a.get("subsidy_escalation", 0.0))))
+
         return {"assumptions": entries}
+
+    def _select_blocks(
+        self, library: Dict[str, Dict[str, Any]], a: Dict[str, Any]
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        Return the subset of blocks to include for this model instance.
+
+        Each block YAML may carry a ``wiring.optional: true`` flag.  When a block
+        is optional, its ``wiring.exclude_when`` field specifies the condition
+        (evaluated against the assumption dict) under which it is dropped.
+
+        Current exclusion rules
+        -----------------------
+        dsra_block         : excluded when dsra_months == 0
+        revenue_subsidy_block : excluded when has_revenue_subsidy != 1
+        """
+        excluded: set = set()
+
+        dsra_months = float(a.get("dsra_months", 6.0))
+        if dsra_months == 0.0:
+            excluded.add("dsra_block")
+
+        has_subsidy = float(a.get("has_revenue_subsidy", 0.0))
+        if has_subsidy != 1.0:
+            excluded.add("revenue_subsidy_block")
+
+        return {bid: blk for bid, blk in library.items() if bid not in excluded}
+
+    def _build_wiring_from_included(
+        self,
+        included: Dict[str, Dict[str, Any]],
+        excluded_ids: set,
+    ) -> Dict[str, Any]:
+        """
+        Assemble model_wiring dynamically from the included block set.
+
+        connections   : derived mechanically from each included block's inputs[].source,
+                        filtering out any connection whose source block is excluded.
+        output_reports: merged from each block's wiring.output_reports section.
+        """
+        from collections import defaultdict
+
+        connections: List[Dict[str, str]] = []
+        seen_connections: set = set()
+        output_reports: Dict[str, List[str]] = defaultdict(list)
+
+        for block in included.values():
+            block_id = block["block_id"]
+
+            # Connections: one per declared input whose source is a block output
+            for inp in block.get("inputs", []):
+                src: str = inp.get("source", "")
+                src_block = src.split(".")[0]
+                # Only add connections between blocks (skip assumption.*, phase.*)
+                if "." not in src or src_block in ("assumption", "phase"):
+                    continue
+                # Drop if the source block has been excluded
+                if src_block in excluded_ids:
+                    continue
+                conn = {"from": src, "to": f"{block_id}.{inp['name']}"}
+                key = (conn["from"], conn["to"])
+                if key not in seen_connections:
+                    seen_connections.add(key)
+                    connections.append(conn)
+
+            # Output reports: merge from block's wiring.output_reports
+            for report_name, vars_list in (
+                block.get("wiring", {}).get("output_reports", {}).items()
+            ):
+                output_reports[report_name].extend(vars_list)
+
+        return {
+            "connections":    connections,
+            "output_reports": dict(output_reports),
+        }
 
     def _build_blocks_and_wiring(
         self, a: Dict[str, Any]
     ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
         """
-        Load blocks from the library, configure inputs, and return
-        (calculation_blocks_dict, model_wiring_dict).
+        Load blocks from the library, select which to include based on assumption
+        flags, configure inputs, and return (calculation_blocks_dict, model_wiring_dict).
         """
         library = self._load_block_library()
 
-        # Assemble blocks in library scan order (executor uses dependency graph for
-        # actual execution order, so declaration order here is informational only).
+        included = self._select_blocks(library, a)
+        excluded_ids = set(library.keys()) - set(included.keys())
+
         ordered_blocks: List[Dict[str, Any]] = [
-            self._configure_block(block, a) for block in library.values()
+            self._configure_block(block, a) for block in included.values()
         ]
 
+        wiring = self._build_wiring_from_included(included, excluded_ids)
         solve_loops = self._determine_solve_loops(a)
 
         calculation_blocks = {
             "blocks":      ordered_blocks,
             "solve_loops": solve_loops,
         }
-        return calculation_blocks, _WIRING
+        return calculation_blocks, wiring
 
     def _configure_block(
         self, block: Dict[str, Any], a: Dict[str, Any]
@@ -404,6 +498,7 @@ class BlueprintAgent:
                 "interest_rate_var":    "assumption.interest_rate",
                 "moratorium_var":       "assumption.moratorium_periods",
                 "debt_sizing_mode_var": "assumption.debt_sizing_mode",
+                "debt_amount_var":      "debt_drawdown_block.debt_amount",
                 "output_principal":     "principal_repayment",
                 "output_interest":      "interest_payment",
                 "output_balance":       "outstanding_debt_balance",
@@ -413,7 +508,7 @@ class BlueprintAgent:
 
         # IDC array fixed-point — always present (IDC always capitalised into debt).
         # The circular dependency (construction_block total_capex uses idc_per_period;
-        # debt_service_block drawdown uses total_capex; idc_block uses cumulative_drawdown)
+        # debt_drawdown_block drawdown uses total_capex; idc_block uses cumulative_drawdown)
         # is resolved generically by re-evaluating owned_blocks in declared order until
         # idc_per_period converges. Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085.
         loops.append({
@@ -422,7 +517,7 @@ class BlueprintAgent:
             "free_variable":     "idc_block.idc_per_period",
             "target_expression": "idc_block.idc_per_period",
             "target_value":      0.0,
-            "owned_blocks":      ["construction_block", "debt_service_block", "idc_block"],
+            "owned_blocks":      ["construction_block", "debt_drawdown_block", "idc_block"],
         })
 
         return loops
@@ -586,11 +681,7 @@ def _slugify(text: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Wiring — loaded from the template (single source of truth)
+# Note: model_wiring is now assembled dynamically in BlueprintAgent._build_wiring_from_included()
+# rather than loaded statically from solar_ipp_base.yaml.  The template is no longer
+# referenced for wiring — each block YAML declares its own wiring.output_reports.
 # ---------------------------------------------------------------------------
-
-def _load_wiring() -> Dict[str, Any]:
-    with open(_TEMPLATE_PATH, encoding="utf-8") as fh:
-        return yaml.safe_load(fh)["model_wiring"]
-
-_WIRING: Dict[str, Any] = _load_wiring()

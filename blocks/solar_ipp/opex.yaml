@@ -75,3 +75,11 @@ body:
   # Total opex = base O&M + insurance + land lease
   - target: total_opex
     expr: "base_opex + insurance + land_lease"
+
+wiring:
+  output_reports:
+    income_statement:
+      - opex_block.base_opex
+      - opex_block.insurance
+      - opex_block.land_lease
+      - opex_block.total_opex

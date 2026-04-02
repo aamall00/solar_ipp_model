@@ -107,6 +107,23 @@ assumption_schema:
       unit: per_year
       value: 0.0
 
+    - name: has_revenue_subsidy
+      type: scalar
+      unit: flag
+      value: 0.0
+
+    - name: subsidy_per_kwh
+      type: scalar
+      unit: INR_per_kWh
+      value: 0.0
+      constraints:
+        min: 0.0
+
+    - name: subsidy_escalation
+      type: scalar
+      unit: per_year
+      value: 0.0
+
     - name: ppa_tenor_years
       type: scalar
       unit: years
@@ -310,23 +327,23 @@ calculation_blocks:
   # ------------------------------------------------------------------
   solve_loops:
     # IDC capitalisation loop — resolves the circular dependency between debt drawdown and IDC:
-    #   debt_service_block draws debt_pct × (hard_capex[t] + idc[t]) each period
+    #   debt_drawdown_block draws debt_pct × (hard_capex[t] + idc[t]) each period
     #   idc_block computes idc_per_period from cumulative_drawdown (average-balance)
-    #   idc_block.idc_per_period feeds back to debt_service_block → circular
+    #   idc_block.idc_per_period feeds back to construction_block → circular
     #
     # The generic array_fixed_point solver re-evaluates owned_blocks in declared
     # order each iteration. Convergence: max(|idc_per_period_new - old|) < tolerance.
     # Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085 → ~3–5 iterations.
-    # debt_service_block runs in full each iteration (drawdown + sizing + service).
+    # debt_service_block (ledger) is NOT in the loop — it runs after sizing converges.
     - loop_id: idc_capitalisation
       type: array_fixed_point
       free_variable: idc_block.idc_per_period
       target_expression: "idc_block.idc_per_period"
       target_value: 0.0
       owned_blocks:
-        - construction_block   # reads idc_per_period (varying) + hard_capex (static)
-        - debt_service_block   # reads construction_block.total_capex; computes drawdown + service
-        - idc_block            # reads debt_service_block.cumulative_drawdown
+        - construction_block      # reads idc_per_period (varying) + hard_capex (static)
+        - debt_drawdown_block     # reads construction_block.total_capex; computes drawdown + sizing
+        - idc_block               # reads debt_drawdown_block.cumulative_drawdown
 
 # ============================================================================
 # 4. Model Wiring
@@ -357,12 +374,12 @@ model_wiring:
     - from: idc_block.idc_per_period
       to: construction_block.idc_per_period
 
-    # Construction total_capex → Debt service (drawdown section, circular leg)
+    # Construction total_capex → Debt drawdown (circular leg)
     - from: construction_block.total_capex
-      to: debt_service_block.total_capex
+      to: debt_drawdown_block.total_capex
 
-    # Debt service cumulative_drawdown → IDC (circular leg)
-    - from: debt_service_block.cumulative_drawdown
+    # Debt drawdown cumulative_drawdown → IDC (circular leg)
+    - from: debt_drawdown_block.cumulative_drawdown
       to: idc_block.cumulative_drawdown
 
     # EBITDA from tax_block → Cashflow block (R2: single source)
@@ -410,7 +427,7 @@ model_wiring:
       to: waterfall_block.dsra_req
 
     # Cashflow CFF inputs (debt drawdown, cash sweep, DSRA movements for FCFE)
-    - from: debt_service_block.drawdown
+    - from: debt_drawdown_block.drawdown
       to: cashflow_block.debt_drawdown
     - from: waterfall_block.cash_sweep
       to: cashflow_block.cash_sweep
@@ -437,11 +454,11 @@ model_wiring:
       - idc_block.idc_per_period
       - construction_block.total_capex
       - construction_block.cumulative_capex
-      - debt_service_block.drawdown
-      - debt_service_block.cumulative_drawdown
-      - debt_service_block.debt_amount
-      - debt_service_block.total_project_cost
-      - debt_service_block.equity_amount
+      - debt_drawdown_block.drawdown
+      - debt_drawdown_block.cumulative_drawdown
+      - debt_drawdown_block.debt_amount
+      - debt_drawdown_block.total_project_cost
+      - debt_drawdown_block.equity_amount
 
     cash_flow_statement:
       - cashflow_block.ebitda

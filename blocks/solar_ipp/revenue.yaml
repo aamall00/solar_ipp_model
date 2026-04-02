@@ -35,3 +35,8 @@ body:
   # Revenue in INR Lakhs (1 Lakh = 100 000 INR)
   - target: revenue
     expr: "net_generation_kwh * effective_tariff / 100000.0"
+
+wiring:
+  output_reports:
+    income_statement:
+      - revenue_block.revenue

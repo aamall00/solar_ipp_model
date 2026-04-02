@@ -61,7 +61,7 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
     # ---- Generation ----
     "capacity_mw": {
         "type": "scalar", "unit": "MW",
-        "default": None,  # required
+        "default": 100.0,  # benchmark default: 100 MW Indian IPP — overridden when Claude extracts a value
         "aliases": ["installed_capacity_mw", "plant_capacity", "dc_capacity_mw",
                     "ac_capacity_mw", "capacity", "size_mw", "mw"],
         "constraints": {"min": 1.0, "max": 5000.0},
@@ -94,7 +94,7 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
     # ---- Revenue ----
     "tariff": {
         "type": "scalar", "unit": "INR per kWh",
-        "default": None,  # required
+        "default": 2.65,  # benchmark default: Rs.2.65/kWh Karnataka solar — overridden when Claude extracts a value
         "aliases": ["ppa_tariff", "tariff_per_kwh", "ppa_rate", "feed_in_tariff",
                     "fit", "contracted_tariff", "levelised_tariff"],
         "constraints": {"min": 0.50, "max": 15.0},
@@ -118,7 +118,7 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
     # ---- Capex ----
     "capex_per_mw": {
         "type": "scalar", "unit": "INR Lakhs per MW",
-        "default": None,  # required
+        "default": 450.0,  # benchmark default: Rs.450 Lakh/MW Indian solar 2024 — overridden when Claude extracts a value
         "aliases": ["capex_per_mw_lakh", "specific_capex", "unit_cost",
                     "epc_cost_per_mw", "cost_per_mw"],
         "constraints": {"min": 150.0, "max": 1000.0},
@@ -171,7 +171,7 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
     },
     "interest_rate": {
         "type": "scalar", "unit": "per_year (decimal)",
-        "default": None,  # required
+        "default": 0.0975,  # benchmark default: 9.75% p.a. typical Indian project finance — overridden when Claude extracts a value
         "aliases": ["loan_interest_rate", "coupon_rate", "borrowing_rate",
                     "interest_pa", "cost_of_debt"],
         "constraints": {"min": 0.04, "max": 0.25},
@@ -332,9 +332,50 @@ _CANONICAL: Dict[str, Dict[str, Any]] = {
             "Set automatically by _derive_cross_assumptions; do not set directly."
         ),
     },
+    # ---- Optional feature flags ----
+    # These control which calculation blocks are included in the model graph.
+    # Claude extracts them from structural phrases in the user's project description.
+    "has_revenue_subsidy": {
+        "type": "scalar", "unit": "flag (0.0 or 1.0)",
+        "default": 0.0,
+        "aliases": [
+            "viability_gap_funding", "vgf", "generation_subsidy", "rec_income",
+            "renewable_energy_certificate", "state_subsidy", "subsidy_income",
+            "has_vgf", "has_subsidy", "has_rec",
+        ],
+        "constraints": {"min": 0.0, "max": 1.0},
+        "description": (
+            "Set to 1.0 if the project receives a generation-linked revenue subsidy "
+            "(VGF, REC, state incentive, etc.).  When 1.0, the revenue_subsidy_block "
+            "is included and subsidy_per_kwh / subsidy_escalation must be provided."
+        ),
+    },
+    "subsidy_per_kwh": {
+        "type": "scalar", "unit": "INR_per_kWh",
+        "default": 0.0,
+        "aliases": [
+            "vgf_per_kwh", "subsidy_rate", "generation_subsidy_rate",
+            "rec_price", "rec_per_kwh", "incentive_per_kwh",
+        ],
+        "constraints": {"min": 0.0, "max": 5.0},
+        "description": "Per-unit generation subsidy in INR/kWh (e.g. 0.50 for ₹0.50/kWh VGF).",
+    },
+    "subsidy_escalation": {
+        "type": "scalar", "unit": "per_year (decimal)",
+        "default": 0.0,
+        "aliases": ["vgf_escalation", "subsidy_growth_rate"],
+        "constraints": {"min": 0.0, "max": 0.10},
+        "description": "Annual escalation rate for the subsidy payment (0.0 = fixed nominal).",
+    },
 }
 
 _REQUIRED_ASSUMPTIONS = [k for k, v in _CANONICAL.items() if v["default"] is None]
+
+# Keys that were previously required (default=None) but now carry Indian IPP benchmark defaults.
+# When _apply_defaults() fills one of these, it is logged at INFO level so callers can see it.
+_BENCHMARK_KEYS: frozenset = frozenset({
+    "capacity_mw", "tariff", "capex_per_mw", "interest_rate"
+})
 
 # ---------------------------------------------------------------------------
 # Wind IPP canonical assumption schema
@@ -406,6 +447,10 @@ _WIND_CANONICAL: Dict[str, Dict[str, Any]] = {
     # directly by the LLM or the user.
     # ---- Equity ----
     "equity_irr_target":        _CANONICAL["equity_irr_target"],
+    # ---- Optional feature flags ----
+    "has_revenue_subsidy":      _CANONICAL["has_revenue_subsidy"],
+    "subsidy_per_kwh":          _CANONICAL["subsidy_per_kwh"],
+    "subsidy_escalation":       _CANONICAL["subsidy_escalation"],
 }
 
 _WIND_REQUIRED_ASSUMPTIONS = [k for k, v in _WIND_CANONICAL.items() if v["default"] is None]
@@ -711,11 +756,18 @@ class AssumptionAgent:
         filled = dict(extracted)
         missing: List[str] = []
 
+        import logging as _logging
+        _log = _logging.getLogger(__name__)
         for name, meta in self._canonical.items():
             if name in filled:
                 continue
             if meta["default"] is not None:
                 filled[name] = meta["default"]
+                if name in _BENCHMARK_KEYS:
+                    _log.info(
+                        "[benchmark default] %s = %s %s -- provide an explicit value to override",
+                        name, meta["default"], meta.get("unit", ""),
+                    )
             else:
                 missing.append(name)
 

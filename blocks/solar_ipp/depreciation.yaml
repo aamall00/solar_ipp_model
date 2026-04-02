@@ -90,3 +90,8 @@ body:
   # Closing balance: floored at zero (should be exactly 0 after full write-off)
   - target: closing
     expr: "max_series(opening - depreciation, scalar_to_series(0.0)) * is_operational"
+
+wiring:
+  output_reports:
+    income_statement:
+      - depreciation_block.depreciation

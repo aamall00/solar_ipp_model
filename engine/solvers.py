@@ -380,14 +380,14 @@ def sculpting_solver(
             balance_arr[t] = bal
             interest_arr[t] = bal * r
 
-        # Repayment periods
+        # Repayment periods — balance_arr records CLOSING balance (after repayment)
         for i in range(n_repay):
             t = repay_start + i
-            balance_arr[t] = bal
             interest_arr[t] = bal * r
             p = max(0.0, actual_ds[i] - interest_arr[t])
             principal[t] = p
             bal = max(0.0, bal - p)
+            balance_arr[t] = bal  # closing balance
 
         # Convergence: remaining balance should be zero
         final_residual = abs(bal) / total_debt

@@ -1,0 +1,98 @@
+# Debt Drawdown Block — Construction-phase drawdown and debt sizing
+#
+# This block handles Sections 1 and 2 of the original debt service block:
+#
+# Section 1 — Drawdown (construction period)
+#   drawdown[t]            = debt_pct × total_capex[t]
+#   cumulative_drawdown[t] = cumsum(drawdown)[t]
+#
+# Section 2 — Sizing (scalar aggregation at COD)
+#   debt_amount        = max(cumulative_drawdown) during construction
+#   total_project_cost = debt_amount / debt_pct  (= Σ hard_capex + Σ IDC)
+#   equity_amount      = total_project_cost − debt_amount
+#
+# Section 3 — Debt addition trigger (one pulse at COD)
+#   debt_addition[t]   = debt_amount at first operational period (COD), else 0
+#
+# This block runs in ARRAY MODE (no forward references), so max(cumulative_drawdown
+# * is_construction) sees the full construction period and correctly returns the
+# total debt at COD — not just the first-quarter drawdown.
+#
+# The circular dependency (drawdown → idc → total_capex → drawdown) is resolved
+# by the array_fixed_point solver (idc_capitalisation loop) in solve_loops.
+#
+# Assumptions consumed:
+#   debt_pct  — Senior debt fraction of total project cost, e.g. 0.70
+
+block_id: debt_drawdown_block
+category: debt
+block_type: standard
+description: "Construction drawdown and debt sizing: cumulative drawdown, total debt, equity, debt addition at COD"
+
+inputs:
+  - name: total_capex
+    source: construction_block.total_capex
+  - name: debt_pct
+    source: assumption.debt_pct
+  - name: is_construction
+    source: phase.is_construction
+  - name: is_operational
+    source: phase.is_operational
+
+outputs:
+  - name: drawdown
+    unit: INR_Lakhs
+  - name: cumulative_drawdown
+    unit: INR_Lakhs
+  - name: debt_amount
+    unit: INR_Lakhs
+  - name: total_project_cost
+    unit: INR_Lakhs
+  - name: equity_amount
+    unit: INR_Lakhs
+  - name: debt_addition
+    unit: INR_Lakhs
+
+body:
+  # --- Section 1: Drawdown ---
+
+  # Quarterly debt drawdown: debt fraction of total period capex (hard + IDC)
+  - target: drawdown
+    expr: "debt_pct * total_capex"
+
+  # Cumulative drawn — equals total debt at end of construction
+  - target: cumulative_drawdown
+    expr: "cumsum(drawdown)"
+
+  # --- Section 2: Sizing ---
+
+  # Total senior debt = maximum cumulative drawdown during construction.
+  # Because this block runs in ARRAY mode (no forward references), the full
+  # cumulative_drawdown array is available here, so max() returns the correct
+  # total debt across all construction periods.
+  - target: debt_amount
+    expr: "scalar_to_series(max(cumulative_drawdown * is_construction))"
+
+  # Total project cost = hard capex + capitalised IDC = debt / debt_pct
+  - target: total_project_cost
+    expr: "scalar_to_series(max(debt_amount) / debt_pct)"
+
+  # Equity = total project cost × (1 − debt fraction)
+  - target: equity_amount
+    expr: "total_project_cost - debt_amount"
+
+  # --- Section 3: Debt addition pulse ---
+
+  # Debt enters the service ledger once at COD (the first operational period).
+  # This is passed as an input to debt_service_block to seed the opening balance.
+  - target: debt_addition
+    expr: "debt_amount * (is_operational - lag(is_operational, 1))"
+
+wiring:
+  output_reports:
+    construction_capex:
+      - debt_drawdown_block.drawdown
+      - debt_drawdown_block.cumulative_drawdown
+      - debt_drawdown_block.debt_amount
+      - debt_drawdown_block.total_project_cost
+      - debt_drawdown_block.equity_amount

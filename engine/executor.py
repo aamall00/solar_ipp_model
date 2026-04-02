@@ -969,20 +969,29 @@ class ModelExecutor:
             bal = total_debt
 
             # Moratorium periods: interest-only, no principal
+            # balance_arr records the CLOSING balance (after any repayment)
             for t in range(cod, repay_start):
-                balance_arr[t] = bal
                 interest_arr[t] = bal * r_per_period
+                balance_arr[t] = bal  # no principal → closing = opening
 
             # Repayment periods: equal principal + declining interest
             for t in range(repay_start, repay_end):
-                balance_arr[t] = bal
                 interest_arr[t] = bal * r_per_period
                 principal[t] = equal_principal
                 bal = max(0.0, bal - equal_principal)
+                balance_arr[t] = bal  # closing balance = after repayment
 
             total_ds = interest_arr + principal
 
+            # Build opening balance array (balance before repayment each period)
+            opening_arr = np.zeros(n)
+            ob = total_debt
+            for t in range(cod, repay_end):
+                opening_arr[t] = ob
+                ob = max(0.0, ob - principal[t])
+
             # Write schedule into namespace using YAML-declared output names
+            namespace[f"{target_block_id}.opening"]         = opening_arr
             namespace[f"{target_block_id}.{out_principal}"] = principal
             namespace[f"{target_block_id}.{out_interest}"]  = interest_arr
             namespace[f"{target_block_id}.{out_balance}"]   = balance_arr
@@ -1096,6 +1105,13 @@ class ModelExecutor:
                 )
 
                 # Write sculpted DS → namespace using YAML-declared output names
+                # Also write opening balance (before repayment) for consistent reporting
+                _cfads_opening = np.zeros(n)
+                _ob = total_debt
+                for _t in range(cod, mat + 1):
+                    _cfads_opening[_t] = _ob
+                    _ob = max(0.0, _ob - float(result.principal_repayment[_t]))
+                namespace[f"{target_block_id}.opening"]         = _cfads_opening
                 namespace[f"{target_block_id}.{out_principal}"] = result.principal_repayment
                 namespace[f"{target_block_id}.{out_interest}"]  = result.interest_payment
                 namespace[f"{target_block_id}.{out_balance}"]   = result.outstanding_balance
@@ -1352,6 +1368,27 @@ class ModelExecutor:
                         loop_subgraph=subgraph,
                     ))
                     handled_loop_ids.add(fp_loop.loop_id)
+
+                    # Block-level loops whose free_variable block is owned by this
+                    # array_fixed_point loop are never reached in the normal iteration
+                    # (owned blocks are skipped). Insert them immediately after so that
+                    # they run once the IDC loop has finalised debt_amount.
+                    fp_owned_set = set(fp_loop.owned_blocks)
+                    for sl in solve_loops:
+                        if sl.loop_id in handled_loop_ids:
+                            continue
+                        fv_block = sl.free_variable.split(".")[0]
+                        if fv_block in fp_owned_set:
+                            post_owned = [
+                                b for b in sorted_blocks if b.block_id not in fp_owned_set
+                            ]
+                            sl_subgraph = [EvaluationStep(kind="block", block=b) for b in post_owned]
+                            plan.append(EvaluationStep(
+                                kind="solve_loop",
+                                solve_loop=sl,
+                                loop_subgraph=sl_subgraph,
+                            ))
+                            handled_loop_ids.add(sl.loop_id)
 
             # Skip blocks owned by any array_fixed_point loop
             if block.block_id in fm_owned:

@@ -58,11 +58,14 @@ Typical end-to-end workflow
     print(report.full_text)
 """
 
+from env_loader import load_local_env
 from agents.assumption_agent import AssumptionAgent, IngestionResult, InferredAssumption
 from agents.blueprint_agent  import BlueprintAgent
 from agents.scenario_agent   import ScenarioAgent, Scenario, STANDARD_SCENARIOS
 from agents.narrative_agent  import NarrativeAgent, NarrativeReport
 from agents.analyst_agent    import AnalystAgent
+
+load_local_env()
 
 __all__ = [
     # Layer 3

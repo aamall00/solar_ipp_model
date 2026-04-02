@@ -1,0 +1,54 @@
+# Revenue Subsidy Block — Generation-linked subsidy income
+#
+# Models a per-unit generation incentive such as:
+#   • Viability Gap Funding (VGF) — top-up payment per kWh to bridge tariff gap
+#   • Renewable Energy Certificates (REC) income
+#   • State government generation subsidy
+#
+# subsidy_income[t] = net_generation_kwh[t] × subsidy_per_kwh / 100 000
+#                     × escalate(1.0, subsidy_escalation)[t]
+#                     × is_operational[t]
+#
+# The subsidy is active for the full operational life of the model.
+# To model a time-limited subsidy, the blueprint agent can set subsidy_per_kwh
+# to a time-series or the user can override to 0 after the subsidy period.
+#
+# This block is OPTIONAL — it is included only when has_revenue_subsidy = 1
+# in the assumption set.  When excluded, income_statement_block.subsidy_income
+# defaults to 0 (executor missing-key default), leaving EBITDA unchanged.
+#
+# Assumptions consumed:
+#   subsidy_per_kwh    — Subsidy rate in INR/kWh, e.g. 0.50
+#   subsidy_escalation — Annual escalation rate for subsidy, e.g. 0.0
+
+block_id: revenue_subsidy_block
+category: revenue
+block_type: standard
+description: "Optional generation-linked subsidy income (VGF / REC / state incentive)"
+
+inputs:
+  - name: net_generation_kwh
+    source: generation_block.net_generation_kwh
+  - name: subsidy_per_kwh
+    source: assumption.subsidy_per_kwh
+  - name: subsidy_escalation
+    source: assumption.subsidy_escalation
+  - name: is_operational
+    source: phase.is_operational
+
+outputs:
+  - name: subsidy_income
+    unit: INR_Lakhs
+
+body:
+  - target: subsidy_income
+    expr: "net_generation_kwh * subsidy_per_kwh * escalate(1.0, subsidy_escalation) / 100000.0 * is_operational"
+
+# revenue_subsidy_block is OPTIONAL — included only when has_revenue_subsidy = 1.
+# Owns all connections referencing it so they are cleanly absent when excluded.
+wiring:
+  optional: true
+  exclude_when: "has_revenue_subsidy != 1"
+  output_reports:
+    income_statement:
+      - revenue_subsidy_block.subsidy_income

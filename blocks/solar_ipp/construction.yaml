@@ -63,3 +63,10 @@ body:
   # Running cumulative capex including IDC — equals total project cost at COD
   - target: cumulative_capex
     expr: "cumsum(total_capex)"
+
+wiring:
+  output_reports:
+    construction_capex:
+      - construction_block.capex_drawdown
+      - construction_block.total_capex
+      - construction_block.cumulative_capex

@@ -31,8 +31,11 @@ _HERE = Path(__file__).parent.resolve()
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
+from env_loader import load_local_env
 from dsl.parser import DSLParser
 from engine.executor import ModelExecutor, ModelResults, MonteCarloResults, SensitivityResults
+
+load_local_env()
 
 
 # ---------------------------------------------------------------------------
@@ -290,7 +293,7 @@ def run_monte_carlo(executor: ModelExecutor, compiled, n_iterations: int = 1000)
 # ---------------------------------------------------------------------------
 
 def _run_portfolio(args) -> None:
-    """Interactive multi-asset portfolio mode."""
+    """Multi-asset portfolio mode — interactive or non-interactive via --prompt."""
     from agents.portfolio_agent import PortfolioAgent
     from engine.portfolio_runner import PortfolioRunner
     from engine.excel_exporter import export_portfolio_to_excel
@@ -300,16 +303,23 @@ def _run_portfolio(args) -> None:
     print("  IPP PORTFOLIO FINANCIAL MODEL")
     print(_SEP)
     print()
-    print("  Describe your portfolio of assets.")
-    print("  Example: 'Two assets in different SPVs — 100 MW solar in SPV-A")
-    print("            at ₹2.65/kWh, 70% debt, and 50 MW wind in SPV-B at ₹3.20/kWh.'")
-    print()
-    portfolio_prompt = input("  Portfolio description: ").strip()
-    if not portfolio_prompt:
-        print("  No input provided. Exiting.")
-        return
 
+    # --- Acquire portfolio prompt ---
+    if args.prompt:
+        portfolio_prompt = args.prompt.strip()
+        print("  Non-interactive mode.")
+        print(f"  Prompt: {portfolio_prompt}")
+    else:
+        print("  Describe your portfolio of assets.")
+        print("  Example: 'Two assets in different SPVs — 100 MW solar in SPV-A")
+        print("            at Rs.2.65/kWh, 70% debt, and 50 MW wind in SPV-B at Rs.3.20/kWh.'")
+        print()
+        portfolio_prompt = input("  Portfolio description: ").strip()
+        if not portfolio_prompt:
+            print("  No input provided. Exiting.")
+            return
     print()
+
     print("  Parsing portfolio...")
     port_agent = PortfolioAgent()
     specs = port_agent.parse(portfolio_prompt)
@@ -317,17 +327,21 @@ def _run_portfolio(args) -> None:
     print(f"  Identified {len(specs)} asset(s):")
     for s in specs:
         print(f"    • {s.name}  [{s.asset_type}]  SPV: {s.spv_name}")
-
     print()
 
-    def _prompt_fn(spec):
-        print(f"\n  --- Assumptions for {spec.name} ({spec.asset_type.upper()}) ---")
-        print(f"  Extracted from portfolio description: \"{spec.description}\"")
-        print("  Add or override any details below (press Enter to use as-is):")
-        extra = input("  Additional details: ").strip()
-        return spec.description + (" " + extra if extra else "")
-
-    ingestions = port_agent.collect_assumptions(specs, prompt_fn=_prompt_fn)
+    # --- Collect per-asset assumptions ---
+    if args.prompt:
+        # Non-interactive: use spec.description extracted from the prompt, no extra input() calls
+        ingestions = port_agent.collect_assumptions(specs, prompt_fn=None)
+    else:
+        # Interactive: allow the user to add or override details per asset
+        def _prompt_fn(spec):
+            print(f"\n  --- Assumptions for {spec.name} ({spec.asset_type.upper()}) ---")
+            print(f"  Extracted from portfolio description: \"{spec.description}\"")
+            print("  Add or override any details below (press Enter to use as-is):")
+            extra = input("  Additional details: ").strip()
+            return spec.description + (" " + extra if extra else "")
+        ingestions = port_agent.collect_assumptions(specs, prompt_fn=_prompt_fn)
 
     print()
     print("  Running financial models...")
@@ -370,6 +384,14 @@ def main() -> None:
             "Portfolio mode: describe multiple assets interactively and export "
             "one Excel workbook with grouped sheets per asset/SPV."
         )
+    )
+    parser.add_argument(
+        "--prompt", type=str, default=None,
+        metavar="TEXT",
+        help=(
+            "Natural-language portfolio description for non-interactive mode (requires --portfolio). "
+            "Example: 'one wind 50 MW and one solar 100 MW, no DSRA on solar, Rs.1/kWh subsidy'"
+        ),
     )
     parser.add_argument(
         "--monte-carlo", action="store_true",

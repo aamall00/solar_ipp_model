@@ -28,6 +28,9 @@ inputs:
     source: debt_service_block.interest_payment
   - name: tax_rate
     source: assumption.tax_rate
+  # Optional: subsidy_income is 0 when revenue_subsidy_block is absent (executor default)
+  - name: subsidy_income
+    source: revenue_subsidy_block.subsidy_income
 
 outputs:
   - name: ebitda
@@ -40,8 +43,9 @@ outputs:
     unit: INR_Lakhs
 
 body:
+  # subsidy_income is 0 when revenue_subsidy_block is absent (namespace default)
   - target: ebitda
-    expr: "revenue - opex"
+    expr: "revenue + subsidy_income - opex"
 
   - target: ebit
     expr: "ebitda - depreciation"
@@ -53,3 +57,11 @@ body:
   # Tax: applied only on positive PBT (no refund, no carry-forward)
   - target: tax
     expr: "max_series(pbt, scalar_to_series(0.0)) * tax_rate"
+
+wiring:
+  output_reports:
+    income_statement:
+      - income_statement_block.ebitda
+      - income_statement_block.ebit
+      - income_statement_block.pbt
+      - income_statement_block.tax

@@ -99,7 +99,7 @@ inputs:
   - name: total_debt_service
     source: debt_service_block.total_debt_service
   - name: debt_drawdown
-    source: debt_service_block.drawdown
+    source: debt_drawdown_block.drawdown
   - name: cash_sweep
     source: waterfall_block.cash_sweep
 
@@ -198,3 +198,23 @@ body:
   #   = equity_invested + (free_cashflow − cash_sweep) × is_operational + net_dsra_cashflow
   - target: equity_cashflow
     expr: "equity_invested + (free_cashflow - cash_sweep) * is_operational + net_dsra_cashflow"
+
+wiring:
+  output_reports:
+    cash_flow_statement:
+      - cashflow_block.ebitda
+      - cashflow_block.capex_during_ops
+      - cashflow_block.cfads
+      - cashflow_block.project_cashflow
+      - cashflow_block.net_debt_cashflow
+      - cashflow_block.cash_sweep
+      - cashflow_block.equity_invested
+      - cashflow_block.free_cashflow
+      - cashflow_block.net_dsra_cashflow
+      - cashflow_block.equity_cashflow
+    returns_summary:
+      - cashflow_block.equity_invested
+      - cashflow_block.net_debt_cashflow
+      - cashflow_block.net_dsra_cashflow
+      - cashflow_block.equity_cashflow
+      - cashflow_block.project_cashflow

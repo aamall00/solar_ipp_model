@@ -162,7 +162,7 @@ class PortfolioAgent:
             max_tokens=1024,
             system=_SYSTEM_PROMPT,
             tools=[_PARSE_PORTFOLIO_TOOL],
-            tool_choice={"type": "required"},
+            tool_choice={"type": "any"},
             messages=[{"role": "user", "content": user_prompt}],
         )
 

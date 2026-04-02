@@ -42,3 +42,8 @@ body:
   # Net generation after station auxiliary consumption
   - target: net_generation_kwh
     expr: "gross_generation_kwh * (1.0 - aux_consumption)"
+
+# Self-declared wiring: output_reports contributions for blueprint assembly.
+# connections are derived mechanically from inputs[].source by the blueprint agent.
+wiring:
+  output_reports: {}  # generation rows appear via income_statement through revenue_block

@@ -1,19 +1,15 @@
-# Debt Service Block — Full debt lifecycle: drawdown → sizing → service ledger
+# Debt Service Block — Operational-period service ledger
 #
-# Section 1 — Drawdown (construction period)
-#   drawdown[t]            = debt_pct × total_capex[t]
-#   cumulative_drawdown[t] = cumsum(drawdown)[t]
+# This block handles the recurrent ledger only. All sizing computations
+# (drawdown, debt_amount, total_project_cost, equity_amount) live in
+# debt_drawdown_block, which runs in array mode so max(cumulative_drawdown)
+# is computed correctly over the full construction period.
 #
-#   The circular dependency (drawdown → idc → total_capex → drawdown) is resolved
-#   by the array_fixed_point solver (idc_capitalisation loop) in solve_loops.
+# By taking debt_amount as a declared INPUT (a pre-computed flat series equal
+# to total debt), sequential mode here has access to the correct installment
+# at every period — not just the first-quarter partial drawdown.
 #
-# Section 2 — Sizing (post-loop, scalar aggregation at COD)
-#   debt_amount        = max(cumulative_drawdown) during construction
-#   total_project_cost = debt_amount / debt_pct  (= Σ hard_capex + Σ IDC)
-#   equity_amount      = total_project_cost − debt_amount
-#
-# Section 3 — Service ledger (equal-principal repayment, operational period)
-#   debt_addition[t]       = debt_amount at first operational period (COD), else 0
+# Section — Service ledger (equal-principal repayment, operational period)
 #   opening[t]             = lag(closing, 1)[t] + debt_addition[t]
 #   interest_payment[t]    = opening[t] × (interest_rate / 4) × is_operational[t]
 #   principal_repayment[t] = min(opening[t], debt_amount / debt_repayment_periods)
@@ -22,7 +18,6 @@
 #   total_debt_service[t]  = principal_repayment[t] + interest_payment[t]
 #
 # Assumptions consumed:
-#   debt_pct                — Senior debt fraction of total project cost, e.g. 0.70
 #   interest_rate           — Annual nominal rate, e.g. 0.0975 (quarterly: / 4)
 #   moratorium_periods      — Quarters after COD before principal repayment begins
 #   debt_repayment_periods  — Tenor of equal-principal repayment in quarters
@@ -30,15 +25,13 @@
 block_id: debt_service_block
 category: debt
 block_type: standard
-description: "Full debt lifecycle: construction drawdown, COD sizing, and equal-principal service ledger"
+description: "Equal-principal debt service ledger: opening/interest/principal/closing recurrence"
 
 inputs:
-  - name: total_capex
-    source: construction_block.total_capex
-  - name: debt_pct
-    source: assumption.debt_pct
-  - name: is_construction
-    source: phase.is_construction
+  - name: debt_amount
+    source: debt_drawdown_block.debt_amount
+  - name: debt_addition
+    source: debt_drawdown_block.debt_addition
   - name: interest_rate
     source: assumption.interest_rate
   - name: moratorium_periods
@@ -49,19 +42,6 @@ inputs:
     source: phase.is_operational
 
 outputs:
-  # Section 1 — Drawdown
-  - name: drawdown
-    unit: INR_Lakhs
-  - name: cumulative_drawdown
-    unit: INR_Lakhs
-  # Section 2 — Sizing
-  - name: debt_amount
-    unit: INR_Lakhs
-  - name: total_project_cost
-    unit: INR_Lakhs
-  - name: equity_amount
-    unit: INR_Lakhs
-  # Section 3 — Service ledger
   - name: opening
     unit: INR_Lakhs
   - name: interest_payment
@@ -76,36 +56,6 @@ outputs:
     unit: INR_Lakhs
 
 body:
-  # --- Section 1: Drawdown ---
-
-  # Quarterly debt drawdown: debt fraction of total period capex (hard + IDC)
-  - target: drawdown
-    expr: "debt_pct * total_capex"
-
-  # Cumulative drawn — equals total debt at end of construction
-  - target: cumulative_drawdown
-    expr: "cumsum(drawdown)"
-
-  # --- Section 2: Sizing ---
-
-  # Total senior debt = closing cumulative drawdown at end of construction
-  - target: debt_amount
-    expr: "scalar_to_series(max(cumulative_drawdown * is_construction))"
-
-  # Total project cost = hard capex + capitalised IDC = debt / debt_pct
-  - target: total_project_cost
-    expr: "scalar_to_series(max(debt_amount) / debt_pct)"
-
-  # Equity = total project cost × (1 − debt fraction)
-  - target: equity_amount
-    expr: "total_project_cost - debt_amount"
-
-  # --- Section 3: Service ledger ---
-
-  # Debt enters the ledger once at COD (the first operational period)
-  - target: debt_addition
-    expr: "debt_amount * (is_operational - lag(is_operational, 1))"
-
   # Opening balance: prior period closing plus the one-off debt addition at COD
   - target: opening
     expr: "lag(closing, 1) + debt_addition"
@@ -115,9 +65,10 @@ body:
   - target: interest_payment
     expr: "opening * interest_rate / 4.0 * is_operational"
 
-  # Equal principal instalment, starting after moratorium
-  # lag(is_operational, moratorium_periods) = 0 during moratorium, 1 thereafter
-  # min_series caps the last instalment to the remaining balance
+  # Equal principal instalment, starting after moratorium.
+  # debt_amount is a pre-computed flat series (correct total debt) passed in as input.
+  # lag(is_operational, moratorium_periods) = 0 during moratorium, 1 thereafter.
+  # min_series caps the last instalment to the remaining balance.
   - target: principal_repayment
     expr: "min_series(opening, debt_amount / debt_repayment_periods) * lag(is_operational, moratorium_periods)"
 
@@ -132,3 +83,12 @@ body:
   # Alias for downstream blocks (cashflow, waterfall, DSRA, returns)
   - target: outstanding_debt_balance
     expr: "closing"
+
+wiring:
+  output_reports:
+    debt_schedule:
+      - debt_service_block.opening
+      - debt_service_block.interest_payment
+      - debt_service_block.principal_repayment
+      - debt_service_block.total_debt_service
+      - debt_service_block.outstanding_debt_balance

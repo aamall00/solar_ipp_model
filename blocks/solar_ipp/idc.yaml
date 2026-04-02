@@ -29,7 +29,7 @@ description: "Interest During Construction — capitalised into debt base, avera
 
 inputs:
   - name: cumulative_drawdown
-    source: debt_service_block.cumulative_drawdown
+    source: debt_drawdown_block.cumulative_drawdown
   - name: interest_rate
     source: assumption.interest_rate
   - name: is_construction
@@ -63,3 +63,8 @@ body:
   # each iteration to include capitalised IDC in total project cost.
   - target: idc_total
     expr: "scalar_to_series(max(cumulative_idc))"
+
+wiring:
+  output_reports:
+    construction_capex:
+      - idc_block.idc_per_period

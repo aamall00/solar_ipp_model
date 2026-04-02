@@ -1,34 +1,40 @@
-# Waterfall Block — 5-bucket priority cash allocation
+# Waterfall Block - 5-bucket priority cash allocation
 #
-# Available cash enters at the top as gross revenue receipts.  Each bucket claims
-# its target amount in strict priority order; leftover flows to the next bucket.
-# The executor enforces: allocated[t] = min(max(remaining[t], 0), target[t]).
+# Available cash enters at the top as gross revenue receipts. Each bucket claims
+# its full target amount in strict priority order. If cumulative bucket targets
+# exceed available cash in any period, the shortfall is backfilled through
+# equity infusion so obligations remain fully funded.
 #
 # Bucket priority:
-#   1. opex_payment        — operating costs + corporate tax (non-negotiable OpEx obligation)
-#   2. senior_debt_service — scheduled P+I on the senior term loan
-#   3. dsra_funding        — incremental top-up to the Debt Service Reserve Account
-#   4. cash_sweep          — optional excess-cash sweep to accelerate debt prepayment
-#   5. equity_distribution — residual to equity holders (auto-computed as waterfall residual)
+#   1. opex_payment        - operating costs + corporate tax (non-negotiable OpEx obligation)
+#   2. senior_debt_service - scheduled P+I on the senior term loan
+#   3. dsra_funding        - incremental top-up to the Debt Service Reserve Account
+#   4. cash_sweep          - optional excess-cash sweep to accelerate debt prepayment
+#   5. equity_distribution - residual surplus to equity holders after all higher-priority buckets
+#
+# Waterfall settlement logic:
+#   allocated[t]           = target[t] for each declared bucket
+#   equity_infusion[t]     = max(sum(bucket_targets[t]) - available_cash[t], 0)
+#   equity_distribution[t] = max(available_cash[t] - sum(bucket_targets[t]), 0)
 #
 # Cash sweep logic:
-#   cash_sweep[t] = (remaining_after_dsra[t]) × cash_sweep_rate × is_debt_outstanding[t]
-#   cash_sweep_rate = 0.0 (default) → all residual flows to equity immediately.
-#   cash_sweep_rate = 1.0 → full sweep; equity receives nothing until debt is retired.
+#   cash_sweep[t] = remaining_after_dsra[t] * cash_sweep_rate * is_debt_outstanding[t]
+#   cash_sweep_rate = 0.0 (default) -> all residual flows to equity immediately.
+#   cash_sweep_rate = 1.0 -> full sweep; equity receives nothing until debt is retired.
 #
 # DSRA funding target:
 #   Uses the incremental increase in required reserve level:
-#   max(0, dsra_required[t] − dsra_required[t−1])
+#   max(0, dsra_required[t] - dsra_required[t-1])
 #   Period 1 funds the full initial reserve; subsequent periods fund only the increment.
 #   DSRA releases flow to equity via the residual (handled by dsra_block).
 #
 # Assumptions consumed:
-#   cash_sweep_rate   — Fraction of post-DSRA excess cash swept to debt (0.0–1.0)
+#   cash_sweep_rate - Fraction of post-DSRA excess cash swept to debt (0.0-1.0)
 
 block_id: waterfall_block
 category: waterfall
 block_type: waterfall
-description: "opex → senior debt service → DSRA funding → cash sweep → equity distribution"
+description: "opex -> senior debt service -> DSRA funding -> cash sweep -> equity distribution"
 
 available_cash_input: revenue_block.revenue
 
@@ -63,33 +69,36 @@ outputs:
     unit: INR_Lakhs
 
 buckets:
-  # Priority 1: Operating costs and taxes — must be paid before any debt service
+  # Priority 1: Operating costs and taxes - must be paid before any debt service
   - name: opex_payment
     priority: 1
     target_expr: "total_opex + tax"
     recipient: opex_block
 
-  # Priority 2: Senior debt P+I — contractual obligation to lenders
+  # Priority 2: Senior debt P+I - contractual obligation to lenders
   - name: senior_debt_service
     priority: 2
     target_expr: "total_ds"
     recipient: debt_service_block
 
-  # Priority 3: DSRA top-up — fund incremental increase in required reserve
-  # dsra_req[t] − dsra_req[t−1] = change in requirement; floored at 0 (no release here)
+  # Priority 3: DSRA top-up - fund incremental increase in required reserve
+  # dsra_req[t] - dsra_req[t-1] = change in requirement; floored at 0 (no release here)
   - name: dsra_funding
     priority: 3
     target_expr: "max_series(dsra_req - lag(dsra_req, 1), scalar_to_series(0.0))"
     recipient: dsra_block
 
-  # Priority 4: Cash sweep — optional excess-cash prepayment of debt
-  # Sweep fraction of remaining cash (after OpEx + DS + DSRA) while debt is outstanding
+  # Priority 4: Cash sweep - optional excess-cash prepayment of debt
+  # Sweep a fraction of residual cash after OpEx, debt service, and DSRA top-up.
   - name: cash_sweep
     priority: 4
     target_expr: "(available_cash - opex_payment - senior_debt_service - dsra_funding) * cash_sweep_rate * is_debt_outstanding"
     recipient: debt_service_block
 
-  # Priority 5: Equity distribution — implicit residual (executor stores automatically
+  # Priority 5: Equity distribution - implicit residual (executor stores automatically
   # after all buckets are processed)
 
-
+wiring:
+  output_reports:
+    cash_flow_statement:
+      - waterfall_block.equity_distribution
