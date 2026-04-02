@@ -54,6 +54,7 @@ from agents.assumption_agent import IngestionResult
 from dsl.assumption_schema_library import load_assumption_schema_entries
 from dsl.expression import ExpressionEvaluator
 from dsl.parser import load_model_from_dict
+from dsl.project_skeleton_library import load_project_skeleton_template
 from dsl.solve_loop_library import load_solve_loop_entries
 from dsl.types import ModelDefinition, ValidationResult
 
@@ -106,6 +107,7 @@ class BlueprintAgent:
         self.model = model
         self.client = client or anthropic.Anthropic()
         self._block_library: Optional[Dict[str, Dict[str, Any]]] = None
+        self._project_skeleton_template: Optional[Dict[str, Any]] = None
         self._assumption_schema_library: Optional[List[Dict[str, Any]]] = None
         self._solve_loop_library: Optional[List[Dict[str, Any]]] = None
 
@@ -200,6 +202,19 @@ class BlueprintAgent:
         self._assumption_schema_library = load_assumption_schema_entries(self.asset_type)
         return self._assumption_schema_library
 
+    def _load_project_skeleton_template(self) -> Dict[str, Any]:
+        """
+        Load the asset-specific project skeleton assembly template from YAML.
+        The raw mapping may contain assembly-only metadata such as rule strings
+        and model_id formatting inputs.
+        """
+        if self._project_skeleton_template is not None:
+            return self._project_skeleton_template
+        self._project_skeleton_template = load_project_skeleton_template(
+            self.asset_type
+        )
+        return self._project_skeleton_template
+
     def _load_solve_loop_library(self) -> List[Dict[str, Any]]:
         """
         Load the asset-specific solve-loop declarations from YAML.
@@ -225,34 +240,73 @@ class BlueprintAgent:
         }
 
     def _build_skeleton(self, a: Dict[str, Any]) -> Dict[str, Any]:
-        schedule             = list(a.get("capex_schedule", [0.25, 0.25, 0.25, 0.25]))
-        construction_periods = len(schedule)
-        ppa_years            = float(a.get("ppa_tenor_years", 25.0))
-        operations_periods   = int(round(ppa_years * 4))
-        debt_years           = float(a.get("debt_tenor_years", 18.0))
-        cod                  = construction_periods
-        debt_maturity        = cod + int(round(debt_years * 4)) - 1
-        total_periods        = construction_periods + operations_periods
-        if debt_maturity >= total_periods:
-            debt_maturity = total_periods - 1
+        template = self._load_project_skeleton_template()
+        periods_per_year = int(template.get("periods_per_year", 4))
+        context: Dict[str, Any] = dict(template.get("default_values", {}) or {})
+        context.update(a)
+        context["periods_per_year"] = periods_per_year
+        context["project_type"] = template["project_type"]
 
-        capacity_mw  = float(a.get("capacity_mw", 100))
-        tariff       = float(a.get("tariff", 2.65))
-        project_type = self._asset_meta["project_type"]
-        cf_key       = self._asset_meta["cuf_or_cf_key"]
-        cf_val       = float(a.get(cf_key, self._asset_meta["cuf_or_cf_default"]))
-        model_id     = _slugify(f"{project_type}_{int(capacity_mw)}mw_cf{cf_val:.0%}")
+        evaluator = ExpressionEvaluator(n_periods=1, periods_per_year=periods_per_year)
+
+        construction_periods = int(
+            self._evaluate_project_skeleton_rule(
+                str(template["construction_periods_rule"]), context, evaluator
+            )
+        )
+        context["construction_periods"] = construction_periods
+
+        operations_periods = int(
+            self._evaluate_project_skeleton_rule(
+                str(template["operations_periods_rule"]), context, evaluator
+            )
+        )
+        context["operations_periods"] = operations_periods
+        context["total_periods"] = construction_periods + operations_periods
+
+        milestones_cfg = template.get("milestones", {}) or {}
+        financial_close = int(milestones_cfg.get("financial_close", 0))
+        context["financial_close"] = financial_close
+
+        cod = int(
+            self._evaluate_project_skeleton_rule(
+                str(milestones_cfg["cod_rule"]), context, evaluator
+            )
+        )
+        context["cod"] = cod
+
+        debt_maturity = int(
+            self._evaluate_project_skeleton_rule(
+                str(milestones_cfg["debt_maturity_rule"]), context, evaluator
+            )
+        )
+
+        cf_metric_name = str(template["cf_metric_name"])
+        cf_default = float(template["cf_metric_default"])
+        capacity_mw = float(
+            context.get("capacity_mw", template.get("capacity_mw_default", 100.0))
+        )
+        cf_val = float(context.get(cf_metric_name, cf_default))
+        model_id = _slugify(
+            str(template["model_id_template"]).format(
+                project_type=template["project_type"],
+                capacity_mw=capacity_mw,
+                capacity_mw_int=int(capacity_mw),
+                cf_value=cf_val,
+                cf_pct=f"{cf_val:.0%}",
+            )
+        )
 
         return {
             "model_id":             model_id,
-            "project_type":         project_type,
-            "currency":             "INR",
-            "currency_unit":        "Lakhs",
-            "periods_per_year":     4,
+            "project_type":         template["project_type"],
+            "currency":             template["currency"],
+            "currency_unit":        template["currency_unit"],
+            "periods_per_year":     periods_per_year,
             "construction_periods": construction_periods,
             "operations_periods":   operations_periods,
             "milestones": {
-                "financial_close": 0,
+                "financial_close": financial_close,
                 "cod":             cod,
                 "debt_maturity":   debt_maturity,
             },
@@ -327,6 +381,24 @@ class BlueprintAgent:
     ) -> bool:
         result = self._evaluate_schema_expression(expr, values)
         return bool(result)
+
+    def _evaluate_project_skeleton_rule(
+        self,
+        expr: str,
+        values: Dict[str, Any],
+        evaluator: ExpressionEvaluator,
+    ) -> Any:
+        result = evaluator.evaluate(expr, values)
+        if isinstance(result, np.ndarray):
+            if result.size != 1:
+                raise ValueError(
+                    f"Project skeleton rule '{expr}' produced a non-scalar array with "
+                    f"shape {result.shape}"
+                )
+            return result.reshape(-1)[0].item()
+        if isinstance(result, np.generic):
+            return result.item()
+        return result
 
     def _select_blocks(
         self, library: Dict[str, Dict[str, Any]], a: Dict[str, Any]

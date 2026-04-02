@@ -1,0 +1,19 @@
+project_skeleton:
+  project_type: wind_ipp
+  currency: INR
+  currency_unit: Lakhs
+  periods_per_year: 4
+  capacity_mw_default: 100.0
+  cf_metric_name: capacity_factor
+  cf_metric_default: 0.30
+  default_values:
+    capex_schedule: [0.25, 0.25, 0.25, 0.25]
+    ppa_tenor_years: 25.0
+    debt_tenor_years: 18.0
+  model_id_template: "{project_type}_{capacity_mw_int}mw_cf{cf_pct}"
+  construction_periods_rule: "len(capex_schedule)"
+  operations_periods_rule: "round(ppa_tenor_years * periods_per_year)"
+  milestones:
+    financial_close: 0
+    cod_rule: "construction_periods"
+    debt_maturity_rule: "min(total_periods - 1, cod + round(debt_tenor_years * periods_per_year) - 1)"

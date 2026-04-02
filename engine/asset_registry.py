@@ -16,6 +16,7 @@ from typing import Dict, Any
 ASSET_REGISTRY: Dict[str, Dict[str, Any]] = {
     "solar": {
         "block_library":           "solar_ipp",
+        "project_skeleton_file":   "solar_ipp.yaml",
         "assumption_schema_file":  "solar_ipp.yaml",
         "solve_loop_file":         "shared_ipp.yaml",
         "assumption_context":      "solar IPP in India",
@@ -28,6 +29,7 @@ ASSET_REGISTRY: Dict[str, Dict[str, Any]] = {
     },
     "wind": {
         "block_library":           "wind_ipp",
+        "project_skeleton_file":   "wind_ipp.yaml",
         "assumption_schema_file":  "wind_ipp.yaml",
         "solve_loop_file":         "shared_ipp.yaml",
         "assumption_context":      "wind IPP in India",

@@ -360,6 +360,7 @@ class ExpressionEvaluator:
         "escalate",
         # Convenience math pass-throughs
         "abs",
+        "len",
         "min",
         "max",
         "round",
@@ -396,6 +397,7 @@ class ExpressionEvaluator:
             "scalar_to_series": self._fn_scalar_to_series,
             "escalate": self._fn_escalate,
             "abs": lambda *a: np.abs(a[0]),
+            "len": lambda *a: len(a[0]),
             "min": lambda *a: np.minimum(a[0], a[1]) if len(a) == 2 else np.min(a[0]),
             "max": lambda *a: np.maximum(a[0], a[1]) if len(a) == 2 else np.max(a[0]),
             "round": lambda *a: np.round(a[0], int(a[1]) if len(a) > 1 else 0),
