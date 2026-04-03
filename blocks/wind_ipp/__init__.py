@@ -2,8 +2,8 @@
 blocks/wind_ipp — CalculationBlock YAML definitions for wind IPP models.
 
 Wind-specific blocks (generation, revenue) live in this directory.
-All other blocks (construction, debt, opex, tax, cashflow, waterfall, returns, etc.)
-are shared directly from blocks/solar_ipp — they contain no solar-specific logic.
+All shared blocks (construction, debt, opex, tax, cashflow, waterfall, etc.)
+are loaded from core_module/ — they contain no asset-specific logic.
 
 Block loading order matches the topological evaluation order of the model.
 """
@@ -15,32 +15,30 @@ from typing import Dict
 
 import yaml
 
-from blocks.solar_ipp import BLOCK_FILES as _SOLAR_BLOCK_FILES
-from blocks.solar_ipp import _BLOCK_DIR as _SOLAR_BLOCK_DIR
 from dsl.types import CalculationBlock
 
 _WIND_BLOCK_DIR = Path(__file__).parent
+_CORE_DIR = _WIND_BLOCK_DIR.parent.parent / "core_module"
 
 # Blocks that have wind-specific implementations (live in blocks/wind_ipp/)
-_WIND_SPECIFIC = {"generation.yaml", "revenue.yaml"}
+_WIND_SPECIFIC: frozenset[str] = frozenset({"generation.yaml", "revenue.yaml"})
 
-# Full ordered list: wind-specific first two, then all solar shared blocks
-# (skip solar generation.yaml and revenue.yaml — replaced by wind versions)
-BLOCK_FILES = ["generation.yaml", "revenue.yaml"] + [
-    f for f in _SOLAR_BLOCK_FILES if f not in _WIND_SPECIFIC
-]
+# Full ordered list: wind-specific first, then all shared core blocks
+BLOCK_FILES: list[str] = sorted(_WIND_SPECIFIC) + sorted(
+    p.name for p in _CORE_DIR.glob("*.yaml")
+)
 
 
 def load_block_raw(filename: str) -> dict:
     """
     Load a single wind IPP block YAML file as a raw dict.
-    Wind-specific blocks are loaded from this package directory;
-    shared blocks are loaded from blocks/solar_ipp/.
+    Wind-specific blocks are loaded from this directory;
+    shared blocks are loaded from core_module/.
     """
     if filename in _WIND_SPECIFIC:
         path = _WIND_BLOCK_DIR / filename
     else:
-        path = _SOLAR_BLOCK_DIR / filename
+        path = _CORE_DIR / filename
     with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 

@@ -1,10 +1,9 @@
 """
-blocks/solar_ipp — Individual CalculationBlock YAML definitions for the
-Karnataka Solar IPP model.
+blocks/solar_ipp — Solar-specific CalculationBlock YAML definitions.
 
-Each YAML file in this directory defines one CalculationBlock that can be
-loaded with `load_block(path)` and composed into a full ModelDefinition via
-the template in dsl/templates/solar_ipp_base.yaml.
+Solar-specific blocks (generation, revenue) live in this directory.
+All shared blocks (construction, debt, opex, tax, cashflow, waterfall, etc.)
+live in core_module/ and are loaded from there.
 """
 
 from __future__ import annotations
@@ -17,21 +16,27 @@ import yaml
 from dsl.types import CalculationBlock
 
 _BLOCK_DIR = Path(__file__).parent
+_CORE_DIR = _BLOCK_DIR.parent.parent / "core_module"
 
-# Block filenames — derived from YAML files on disk so the list stays in sync
-# with the block library without manual maintenance.
-BLOCK_FILES: list[str] = sorted(p.name for p in _BLOCK_DIR.glob("*.yaml"))
+# Solar-specific block filenames (generation.yaml, revenue.yaml)
+_SOLAR_FILES: frozenset[str] = frozenset(p.name for p in _BLOCK_DIR.glob("*.yaml"))
+
+# All block filenames: solar-specific + shared core
+BLOCK_FILES: list[str] = sorted(_SOLAR_FILES) + sorted(
+    p.name for p in _CORE_DIR.glob("*.yaml")
+)
 
 
 def load_block_raw(filename: str) -> dict:
     """
     Load a single block YAML file and return the raw dict.
-    Use this when the block needs to be mutated before assembly (e.g. in BlueprintAgent).
+    Solar-specific blocks are loaded from this directory; shared blocks
+    are loaded from core_module/.
 
     Parameters
     ----------
     filename : str
-        Filename (e.g. "generation.yaml") relative to this package directory,
+        Filename (e.g. "generation.yaml") relative to the block directories,
         or an absolute path string.
 
     Returns
@@ -39,8 +44,12 @@ def load_block_raw(filename: str) -> dict:
     dict
     """
     path = Path(filename)
-    if not path.is_absolute():
+    if path.is_absolute():
+        pass
+    elif filename in _SOLAR_FILES:
         path = _BLOCK_DIR / filename
+    else:
+        path = _CORE_DIR / filename
     with open(path, "r", encoding="utf-8") as fh:
         return yaml.safe_load(fh)
 
@@ -52,7 +61,7 @@ def load_block(filename: str) -> CalculationBlock:
     Parameters
     ----------
     filename : str
-        Filename (e.g. "generation.yaml") relative to this package directory,
+        Filename (e.g. "generation.yaml") relative to the block directories,
         or an absolute path string.
 
     Returns

@@ -701,6 +701,14 @@ def _sheet_project_model(wb, results, compiled, sheet_prefix: str = "") -> None:
     def _get(key):
         return v.get(key, np.zeros(n))
 
+    def _safe_divide(numerator, denominator):
+        num = np.asarray(numerator, dtype=np.float64)
+        den = np.asarray(denominator, dtype=np.float64)
+        out = np.full_like(num, np.nan, dtype=np.float64)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            np.divide(num, den, out=out, where=den != 0)
+        return out
+
     ds   = _get("debt_service_block.total_debt_service")
     bal  = _get("debt_service_block.outstanding_debt_balance")
     mask = bal > 0
@@ -738,8 +746,7 @@ def _sheet_project_model(wb, results, compiled, sheet_prefix: str = "") -> None:
         {"type": "blank"},
         {"type": "header", "title": "EBITDA Margin"},
         {"type": "row", "label": "EBITDA Margin %",
-         "array": np.where(_get("revenue_block.revenue") > 0,
-                           _get("cashflow_block.ebitda") / _get("revenue_block.revenue"), np.nan),
+         "array": _safe_divide(_get("cashflow_block.ebitda"), _get("revenue_block.revenue")),
          "unit": "%", "fmt": FMT_PCT1, "indent": 1},
 
         # ── CASH FLOW STATEMENT ──────────────────────────────────────────────
