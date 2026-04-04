@@ -424,13 +424,13 @@ class TestDependencyGraph:
         # revenue_block should depend on generation_block
         assert graph.has_edge("generation_block", "revenue_block")
 
-    def test_undeclared_cycle_raises_error(self, parser):
-        # Create a cycle: A → B → A with no solve_loop
+    def test_undeclared_cycle_auto_resolved(self, parser):
+        # Create a cycle: generation_block → revenue_block → generation_block
+        # with no declared solve_loop. The parser should auto-generate an
+        # array_fixed_point loop (AUTO_CYCLE info warning) rather than erroring.
         data = minimal_model()
-        # Modify revenue_block to depend on itself (via generation_block which depends on it)
         for b in data["calculation_blocks"]["blocks"]:
             if b["block_id"] == "generation_block":
-                # Add an input sourced from revenue_block output (creating a cycle)
                 b["inputs"].append({
                     "name": "revenue_feedback",
                     "source": "revenue_block.ppa_revenue",
@@ -438,17 +438,14 @@ class TestDependencyGraph:
                 b["body"][0]["expr"] = (
                     "installed_mw * cuf * 2190 * 1000 * is_operational + revenue_feedback * 0"
                 )
-        # This should fail wiring validation (revenue_block not yet computed at generation_block time)
-        # For cycle detection, we check the graph SCC
-        # The wiring cross-check in ModelDefinition will catch this as an unresolved reference
-        # OR the cycle detector will flag it
         _, validation = parser.load_dict(data)
-        # Either a wiring error or a cycle error is acceptable
-        has_issue = (not validation.valid) or any(
-            "cycle" in e.lower() for e in validation.errors
-        )
-        assert has_issue, (
-            "Expected either a validation error or cycle error for circular dependency"
+        # No error — cycle is auto-resolved
+        cycle_errors = [e for e in validation.errors if "cycle" in e.lower()]
+        assert cycle_errors == [], f"Expected no cycle errors, got: {cycle_errors}"
+        # An AUTO_CYCLE info warning should be present
+        warning_codes = [w.code for w in validation.warnings]
+        assert "AUTO_CYCLE" in warning_codes, (
+            f"Expected AUTO_CYCLE warning for undeclared cycle. Got: {warning_codes}"
         )
 
 

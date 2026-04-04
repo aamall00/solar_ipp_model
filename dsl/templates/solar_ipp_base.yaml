@@ -326,24 +326,8 @@ calculation_blocks:
   # Solve Loops
   # ------------------------------------------------------------------
   solve_loops:
-    # IDC capitalisation loop — resolves the circular dependency between debt drawdown and IDC:
-    #   debt_drawdown_block draws debt_pct × (hard_capex[t] + idc[t]) each period
-    #   idc_block computes idc_per_period from cumulative_drawdown (average-balance)
-    #   idc_block.idc_per_period feeds back to construction_block → circular
-    #
-    # The generic array_fixed_point solver re-evaluates owned_blocks in declared
-    # order each iteration. Convergence: max(|idc_per_period_new - old|) < tolerance.
-    # Contraction ratio ≈ debt_pct × r_q / 2 ≈ 0.0085 → ~3–5 iterations.
-    # debt_service_block (ledger) is NOT in the loop — it runs after sizing converges.
-    - loop_id: idc_capitalisation
-      type: array_fixed_point
-      free_variable: idc_block.idc_per_period
-      target_expression: "idc_block.idc_per_period"
-      target_value: 0.0
-      owned_blocks:
-        - construction_block      # reads idc_per_period (varying) + hard_capex (static)
-        - debt_drawdown_block     # reads construction_block.total_capex; computes drawdown + sizing
-        - idc_block               # reads debt_drawdown_block.cumulative_drawdown
+    # The IDC capitalisation loop (construction_block ↔ debt_drawdown_block ↔ idc_block)
+    # is auto-detected and resolved by the parser. No declaration needed.
 
 # ============================================================================
 # 4. Model Wiring

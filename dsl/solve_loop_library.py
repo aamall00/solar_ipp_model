@@ -28,7 +28,7 @@ def load_solve_loop_entries(asset_type: str) -> List[Dict[str, Any]]:
     with open(path, "r", encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
 
-    solve_loops = raw.get("solve_loops", [])
+    solve_loops = raw.get("solve_loops") or []
     if not isinstance(solve_loops, list):
         raise ValueError(
             f"Solve-loop file '{path}' must contain a top-level "

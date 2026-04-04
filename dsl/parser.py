@@ -38,6 +38,7 @@ from .types import (
     Phases,
     ProjectSkeleton,
     SolveLoop,
+    SolveLoopType,
     ValidationResult,
     ValidationWarning,
 )
@@ -152,9 +153,16 @@ class DSLParser:
                 )
             return None, validation
 
-        # --- Step 4: Dependency graph + cycle detection ---
+        # --- Step 4: Dependency graph + cycle detection / auto-resolution ---
         graph = self._build_dependency_graph(model)
-        self._check_for_unexpected_cycles(graph, model.calculation_blocks.solve_loops, validation)
+        auto_loops = self._resolve_cycles(
+            graph, model.calculation_blocks.solve_loops, model, validation
+        )
+        if auto_loops:
+            updated_blocks = model.calculation_blocks.model_copy(
+                update={"solve_loops": list(model.calculation_blocks.solve_loops) + auto_loops}
+            )
+            model = model.model_copy(update={"calculation_blocks": updated_blocks})
 
         # --- Step 5: Assumption source coverage ---
         # Validates that every assumption.X referenced by a block input is declared
@@ -213,7 +221,7 @@ class DSLParser:
             return CalculationBlocks(blocks=[])
 
         blocks_raw = raw.get("blocks", [])
-        solve_loops_raw = raw.get("solve_loops", [])
+        solve_loops_raw = raw.get("solve_loops") or []
 
         blocks = self._parse_blocks_list(blocks_raw, validation)
         solve_loops = self._parse_solve_loops(solve_loops_raw, validation)
@@ -356,67 +364,139 @@ class DSLParser:
     # Cycle detection
     # ------------------------------------------------------------------
 
-    def _check_for_unexpected_cycles(
+    def _resolve_cycles(
         self,
         graph: nx.DiGraph,
         solve_loops: List[SolveLoop],
+        model: ModelDefinition,
         validation: ValidationResult,
-    ) -> None:
+    ) -> List[SolveLoop]:
         """
-        Detect cycles in the dependency graph.
-        A cycle is acceptable only if it corresponds to a declared solve_loop.
+        Detect cycles in the dependency graph and resolve them.
 
-        Strategy:
-        1. Find all Strongly Connected Components (SCCs) of size > 1.
-        2. For each such SCC, check whether a solve_loop covers it.
-        3. If no solve_loop covers the cycle → error.
+        - SCCs covered by a declared solve_loop: accepted as-is (info warning).
+        - SCCs with NO declaration: auto-generate an array_fixed_point loop by
+          topologically ordering the SCC blocks and using the back-edge source
+          block's first output as the convergence monitor.
+
+        Returns a list of auto-generated SolveLoop objects to be merged into
+        the model. Errors only if the cycle is genuinely unresolvable (no block
+        nodes in SCC).
         """
         sccs = list(nx.strongly_connected_components(graph))
         cyclic_sccs = [scc for scc in sccs if len(scc) > 1]
 
         if not cyclic_sccs:
-            return  # No cycles — fully acyclic, ideal
+            return []
 
-        # Collect the block_ids covered by each declared solve loop.
-        # For array_fixed_point loops, use the authoritative owned_blocks list.
-        # For other loop types, fall back to heuristic string scanning.
+        # Build declared coverage sets (block_ids covered by each declared loop).
         declared_loop_blocks: List[Set[str]] = []
         for sl in solve_loops:
             if sl.owned_blocks:
-                # Authoritative: owned_blocks explicitly declares the cycle members
                 covered: Set[str] = set(sl.owned_blocks)
             else:
                 covered = set()
-                # free_variable is "assumption.X" or "block_id.output" → get block_id
                 fv = sl.free_variable
                 if not fv.startswith("assumption."):
                     covered.add(fv.split(".")[0])
-                # target_expression references other blocks (simple string scan)
-                for block in graph.nodes:
-                    if graph.nodes[block].get("type") == "block" and block in sl.target_expression:
-                        covered.add(block)
+                for node in graph.nodes:
+                    if graph.nodes[node].get("type") == "block" and node in sl.target_expression:
+                        covered.add(node)
             declared_loop_blocks.append(covered)
 
+        auto_loops: List[SolveLoop] = []
+
         for scc in cyclic_sccs:
-            # Check if any declared loop's covered blocks overlap with this SCC
             covered_by_loop = any(
                 len(loop_blocks & scc) >= 2 or (len(loop_blocks & scc) >= 1 and len(scc) == 2)
                 for loop_blocks in declared_loop_blocks
             )
-            if not covered_by_loop:
-                sorted_scc = sorted(scc)
-                validation.add_error(
-                    f"Unexpected dependency cycle detected among blocks/nodes: "
-                    f"{sorted_scc}. "
-                    f"If this is intentional, declare a solve_loop covering this cycle."
-                )
-            else:
-                # Cycle is covered — note it as info
+            if covered_by_loop:
                 validation.add_warning(
                     "DECLARED_CYCLE",
                     f"Declared solve loop covers cycle: {sorted(scc)}",
                     severity="info",
                 )
+            else:
+                loop = self._auto_generate_loop_for_scc(scc, graph, model)
+                if loop is None:
+                    validation.add_error(
+                        f"Undeclared dependency cycle among {sorted(scc)} contains no "
+                        f"block nodes — cannot auto-resolve. Declare a solve_loop."
+                    )
+                else:
+                    auto_loops.append(loop)
+                    validation.add_warning(
+                        "AUTO_CYCLE",
+                        f"Auto-generated array_fixed_point loop '{loop.loop_id}' for "
+                        f"cycle {sorted(scc)}. Declare explicitly in solve_loops to "
+                        f"override tolerance/max_iterations (defaults: 1e-6 / 25).",
+                        severity="info",
+                    )
+
+        return auto_loops
+
+    def _auto_generate_loop_for_scc(
+        self,
+        scc: Set[str],
+        graph: nx.DiGraph,
+        model: ModelDefinition,
+    ) -> Optional[SolveLoop]:
+        """
+        Build an array_fixed_point SolveLoop for an undeclared SCC.
+
+        Algorithm:
+        1. Keep only block-type nodes (drop assumption.X / phase.X).
+        2. Build the induced subgraph on those nodes.
+        3. Find the back-edge via DFS cycle detection.
+        4. Remove the back-edge and topologically sort → owned_blocks order.
+        5. Use the back-edge source block's first declared output as free_variable.
+        """
+        block_ids = [n for n in scc if graph.nodes[n].get("type") == "block"]
+        if not block_ids:
+            return None
+
+        induced = graph.subgraph(block_ids).copy()
+
+        # Find the back-edge (last edge in the DFS cycle)
+        try:
+            cycle_edges = nx.find_cycle(induced)
+            back_src, back_dst = cycle_edges[-1][0], cycle_edges[-1][1]
+        except nx.NetworkXNoCycle:
+            # Degenerate: no intra-block cycle — pick arbitrary ordering
+            back_src = block_ids[0]
+            back_dst = block_ids[0]
+
+        # Remove back-edge and topologically sort the remaining DAG
+        dag = induced.copy()
+        if dag.has_edge(back_src, back_dst):
+            dag.remove_edge(back_src, back_dst)
+        try:
+            ordered = list(nx.topological_sort(dag))
+            # Keep only nodes that are actual block_ids (filter out any strays)
+            ordered = [n for n in ordered if n in set(block_ids)]
+        except nx.NetworkXUnfeasible:
+            ordered = block_ids
+
+        # free_variable: first declared output of the back-edge source block
+        block_map = {b.block_id: b for b in model.calculation_blocks.blocks}
+        src_block = block_map.get(back_src)
+        if src_block and src_block.outputs:
+            free_var = f"{back_src}.{src_block.outputs[0].name}"
+        else:
+            free_var = f"{back_src}.output"
+
+        loop_id = "auto_" + "_".join(sorted(block_ids))
+        return SolveLoop(
+            loop_id=loop_id,
+            type=SolveLoopType.array_fixed_point,
+            free_variable=free_var,
+            target_expression=free_var,
+            target_value=0.0,
+            owned_blocks=ordered,
+            tolerance=1e-6,
+            max_iterations=25,
+        )
 
     # ------------------------------------------------------------------
     # Assumption source coverage

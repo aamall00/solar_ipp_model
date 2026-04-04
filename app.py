@@ -646,6 +646,32 @@ st.markdown("""
         height: 4.8rem;
     }
 
+    .qa-fab {
+        position: fixed;
+        right: 1.5rem;
+        bottom: 2.5rem;
+        z-index: 9999;
+    }
+
+    .qa-fab button {
+        background: linear-gradient(135deg, #2a2a2a, #1a1a1a) !important;
+        border: 1px solid var(--line) !important;
+        border-radius: 24px !important;
+        color: var(--ink) !important;
+        font-size: 0.82rem !important;
+        font-weight: 600 !important;
+        padding: 0.55rem 1.1rem !important;
+        box-shadow: 0 4px 18px rgba(0,0,0,0.45) !important;
+        white-space: nowrap !important;
+        cursor: pointer !important;
+        transition: box-shadow 0.18s ease, border-color 0.18s ease !important;
+    }
+
+    .qa-fab button:hover {
+        border-color: var(--accent) !important;
+        box-shadow: 0 6px 24px rgba(0,0,0,0.6) !important;
+    }
+
     .qa-launch-spacer {
         height: 1rem;
     }
@@ -1101,17 +1127,12 @@ if results:
             asset_key = _asset_ui_key(ar, idx)
             ctx      = ctx_cache[asset_key]
             ai_specs = spec_cache.get(asset_key, {"charts": []})
-            intro_col, qa_col = st.columns([4.8, 1.15], gap="large")
-            with intro_col:
-                _render_asset_dashboard_intro(ar, ctx)
-            with qa_col:
-                st.markdown('<div class="qa-launch-spacer"></div>', unsafe_allow_html=True)
-                if st.button(
-                    "Asset QA",
-                    key=f"open_qa_{asset_key}",
-                    use_container_width=True,
-                ):
-                    _render_asset_qa_dialog(asset_key, ar.spec.name, ctx)
+            _render_asset_dashboard_intro(ar, ctx)
+
+            st.markdown('<div class="qa-fab">', unsafe_allow_html=True)
+            if st.button("Asset Q&A", key=f"open_qa_{asset_key}"):
+                _render_asset_qa_dialog(asset_key, ar.spec.name, ctx)
+            st.markdown('</div>', unsafe_allow_html=True)
 
             # 1. Standard charts
             _render_standard_charts(ar, ctx)
