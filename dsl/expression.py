@@ -422,6 +422,8 @@ class ExpressionEvaluator:
         if n_shift < 0:
             raise ExpressionError(f"lag() shift must be >= 0, got {n_shift}")
         arr = np.asarray(series, dtype=np.float64)
+        if arr.ndim == 0:
+            arr = np.full(self.n_periods, float(arr))
         result = np.zeros(self.n_periods, dtype=np.float64)
         if n_shift < self.n_periods:
             end = self.n_periods - n_shift

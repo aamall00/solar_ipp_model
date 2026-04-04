@@ -1162,8 +1162,8 @@ def _sheet_assumptions(wb, results, compiled, sheet_prefix: str = "") -> None:
     ws.column_dimensions["D"].width = 18
 
 
-def _sheet_audit_trail(wb, results, compiled) -> None:
-    ws = wb.create_sheet("Audit Trail")
+def _sheet_audit_trail(wb, results, compiled, sheet_prefix: str = "") -> None:
+    ws = wb.create_sheet(f"{sheet_prefix}Audit Trail")
     ws.sheet_view.showGridLines = False
 
     ws.merge_cells("A1:D1")
@@ -1268,6 +1268,7 @@ def export_to_excel(
 def export_portfolio_to_excel(
     asset_results,
     path: str | Path = "portfolio_output.xlsx",
+    include_audit_trail: bool = True,
 ) -> Path:
     """
     Export a list of AssetResult objects to a single Excel workbook.
@@ -1278,6 +1279,7 @@ def export_portfolio_to_excel(
     [SPV-1] Cover          — project summary for asset 1
     [SPV-1] Project Model  — combined Income Statement / Cash Flow / Debt Schedule
     [SPV-1] Assumptions
+    [SPV-1] Audit Trail    — all intermediate variables (if include_audit_trail=True)
     [SPV-2] Cover          — project summary for asset 2
     ... (repeated for each asset)
 
@@ -1285,6 +1287,7 @@ def export_portfolio_to_excel(
     ----------
     asset_results : List[AssetResult] from PortfolioRunner.run()
     path          : Output file path.
+    include_audit_trail : If True, adds an Audit Trail sheet per asset (default: True)
 
     Returns
     -------
@@ -1307,6 +1310,8 @@ def export_portfolio_to_excel(
         _sheet_cover(wb, ar.model_results, ar.compiled, None, sheet_prefix=prefix)
         _sheet_project_model(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
         _sheet_assumptions(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
+        if include_audit_trail:
+            _sheet_audit_trail(wb, ar.model_results, ar.compiled, sheet_prefix=prefix)
 
     wb.save(path)
     return path

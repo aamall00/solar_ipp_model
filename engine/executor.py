@@ -527,13 +527,14 @@ class ModelExecutor:
         ev = compiled.evaluator
 
         # Build local context from declared inputs
+        n_periods = compiled.n_periods
         ctx: Dict[str, Any] = {}
         for inp in block.inputs:
             value = namespace.get(inp.source)
             if value is None:
                 # Phase mask shorthand: allow "is_operational" as bare name
                 bare = inp.source.split(".")[-1]
-                value = namespace.get(f"phase.{bare}", 0.0)
+                value = namespace.get(f"phase.{bare}", np.zeros(n_periods))
             ctx[inp.name] = value
 
         # Execute body steps

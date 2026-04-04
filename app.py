@@ -30,7 +30,9 @@ load_local_env()
 
 from agents.portfolio_agent import PortfolioAgent
 from agents.dashboard_agent import DashboardAgent
-from engine.portfolio_runner import PortfolioRunner
+from agents.scenario_agent import ScenarioAgent
+from engine.executor import ModelExecutor
+from engine.portfolio_runner import AssetResult, PortfolioRunner
 from engine.excel_exporter import export_portfolio_to_excel
 
 
@@ -293,6 +295,43 @@ def _asset_ui_key(ar, idx: int) -> str:
     return f"{idx}_{ar.spec.spv_name}_{ar.spec.asset_type}_{ar.spec.name}"
 
 
+_ASSET_ICONS = {
+    "solar": "☀️",
+    "wind": "🌬️",
+    "hydro": "💧",
+    "battery": "🔋",
+}
+
+
+def _get_asset_icon(asset_type: str) -> str:
+    """Return an emoji icon for the asset type, with a sensible fallback."""
+    return _ASSET_ICONS.get(asset_type.lower().strip(), "⚡")
+
+
+_FINANCIAL_TERM_TOOLTIPS = {
+    "DSCR": "Debt Service Coverage Ratio — CFADS divided by total debt service. Measures the ability to meet debt obligations.",
+    "LLCR": "Loan Life Coverage Ratio — NPV of CFADS over the loan life divided by outstanding debt. Indicates long-term debt sustainability.",
+    "DSRA": "Debt Service Reserve Account — A cash reserve (typically 6 months) to protect against payment shortfalls.",
+    "CFADS": "Cash Flow Available for Debt Service — Operating cash flow after taxes and working capital changes, before financing costs.",
+    "Equity IRR": "Internal Rate of Return to equity investors — the annualized effective compounded return rate.",
+    "Project IRR": "Internal Rate of Return to the entire project (debt + equity), independent of financing structure.",
+    "NPV (Equity)": "Net Present Value of equity cashflows, discounted at the target return rate.",
+    "Debt Payback": "Time required to fully repay the outstanding debt from project cashflows.",
+}
+
+
+def _render_metric_label(label: str) -> str:
+    """Render a metric label with an optional tooltip."""
+    tooltip = _FINANCIAL_TERM_TOOLTIPS.get(label)
+    if not tooltip:
+        return label
+    # Use a simple CSS tooltip + accessible title
+    return (
+        f'<span class="tooltip-trigger" title="{tooltip}">{label}'
+        '<span class="tooltip-icon">?</span></span>'
+    )
+
+
 def _render_asset_summary_card(ar) -> None:
     """Render a compact, polished summary card for one asset."""
     k = ar.model_results.kpis
@@ -323,7 +362,7 @@ def _render_asset_summary_card(ar) -> None:
     metric_rows = "".join(
         (
             '<div class="metric-row">'
-            f'<span class="metric-label">{label}</span>'
+            f'<span class="metric-label">{_render_metric_label(label)}</span>'
             f'<span class="metric-value">{value}</span>'
             "</div>"
         )
@@ -341,7 +380,7 @@ def _render_asset_summary_card(ar) -> None:
     st.markdown(
         (
             '<div class="summary-card">'
-            f'<div class="summary-card-header">{ar.spec.name}</div>'
+            f'<div class="summary-card-header">{_get_asset_icon(ar.spec.asset_type)} {ar.spec.name}</div>'
             f'<div class="summary-card-subtitle">{ar.spec.asset_type.upper()}  |  SPV: {ar.spec.spv_name}</div>'
             f'<div class="metric-grid">{metric_rows}</div>'
             f"{warning_rows}"
@@ -397,14 +436,77 @@ def _render_asset_dashboard_intro(ar, ctx: Dict[str, Any]) -> None:
     )
 
 
-def _render_chart_heading(title: str, subtitle: str | None = None) -> None:
-    st.markdown(f'<div class="chart-title">{title}</div>', unsafe_allow_html=True)
-    if subtitle:
-        st.markdown(f'<div class="chart-subtitle">{subtitle}</div>', unsafe_allow_html=True)
+def _render_chart_heading(title: str, subtitle: str | None = None, chart_id: str | None = None) -> None:
+    title_col, action_col = st.columns([4, 1])
+    with title_col:
+        st.markdown(f'<div class="chart-title">{title}</div>', unsafe_allow_html=True)
+        if subtitle:
+            st.markdown(f'<div class="chart-subtitle">{subtitle}</div>', unsafe_allow_html=True)
+    with action_col:
+        if chart_id:
+            st.markdown(
+                f'<button class="chart-download-btn" onclick="downloadChart(\'{chart_id}\')" title="Download as PNG">',
+                unsafe_allow_html=True,
+            )
+            st.markdown('</button>', unsafe_allow_html=True)
 
 
-@st.dialog("Asset QA", width="large")
-def _render_asset_qa_dialog(asset_key: str, asset_name: str, ctx: Dict[str, Any]) -> None:
+def _override_label(overrides: Dict[str, Any]) -> str:
+    """Human-readable summary of assumption overrides, e.g. 'tariff → 4.8, cuf → 0.18'."""
+    parts = []
+    for k, v in overrides.items():
+        if isinstance(v, float) and v == int(v):
+            parts.append(f"{k} → {int(v)}")
+        else:
+            parts.append(f"{k} → {v}")
+    return ", ".join(parts)
+
+
+def _format_scenario_kpi_table(
+    base_kpis, scenario_kpis, overrides: Dict[str, Any]
+) -> str:
+    """Return a markdown KPI comparison table (base vs scenario)."""
+    label = _override_label(overrides)
+
+    def _pct(v):
+        return f"{v * 100:.2f}%" if v is not None else "—"
+
+    def _x(v):
+        return f"{v:.3f}×" if v is not None else "—"
+
+    def _l(v):
+        return f"₹{v:,.0f}L" if v is not None else "—"
+
+    def _y(v):
+        return f"{v:.1f} yrs" if v is not None else "—"
+
+    rows = [
+        ("Equity IRR",    _pct(base_kpis.equity_irr),    _pct(scenario_kpis.equity_irr)),
+        ("Project IRR",   _pct(base_kpis.project_irr),   _pct(scenario_kpis.project_irr)),
+        ("Min DSCR",      _x(base_kpis.min_dscr),        _x(scenario_kpis.min_dscr)),
+        ("Avg DSCR",      _x(base_kpis.avg_dscr),        _x(scenario_kpis.avg_dscr)),
+        ("LLCR",          _x(base_kpis.llcr),            _x(scenario_kpis.llcr)),
+        ("NPV (equity)",  _l(base_kpis.npv_equity),      _l(scenario_kpis.npv_equity)),
+        ("Debt Payback",  _y(base_kpis.debt_payback_period), _y(scenario_kpis.debt_payback_period)),
+    ]
+    lines = [
+        f"**Scenario: {label}**\n",
+        "| KPI | Base Case | Scenario |",
+        "|-----|-----------|----------|",
+    ]
+    for name, base_val, scen_val in rows:
+        lines.append(f"| {name} | {base_val} | {scen_val} |")
+    return "\n".join(lines) + "\n\n"
+
+
+def _make_scenario_asset_result(ar: "AssetResult", scenario_results) -> "AssetResult":
+    """Lightweight AssetResult substitute for _build_model_context() with scenario results."""
+    from dataclasses import replace
+    return replace(ar, model_results=scenario_results)
+
+
+@st.dialog("Asset Q&A", width="large")
+def _render_asset_qa_dialog(asset_key: str, asset_name: str, ctx: Dict[str, Any], ar=None) -> None:
     chat_key = f"chat_{asset_key}"
     if chat_key not in st.session_state:
         st.session_state[chat_key] = []
@@ -436,11 +538,139 @@ def _render_asset_qa_dialog(asset_key: str, asset_name: str, ctx: Dict[str, Any]
                 with st.chat_message(msg["role"]):
                     st.write(msg["content"])
 
+    # Suggested questions carousel
+    suggested_questions = [
+        "What drives the minimum DSCR and when does it occur?",
+        "When does the equity investment break even?",
+        "How does the DSRA behave over the debt tenure?",
+        "What is the peak debt exposure and when is it reached?",
+        "Show me the revenue, OPEX, and EBITDA relationship.",
+        "What drives the shape of the debt service profile?",
+    ]
+
+    if not history:
+        st.markdown('<div class="suggested-questions-label">Suggested questions:</div>', unsafe_allow_html=True)
+        q_cols = st.columns(2)
+        for idx, q in enumerate(suggested_questions):
+            with q_cols[idx % 2]:
+                if st.button(q, key=f"suggested_q_{asset_key}_{idx}", use_container_width=True):
+                    st.session_state[chat_key].append({"role": "user", "content": q})
+                    with st.spinner("Thinking through the model context..."):
+                        answer = DashboardAgent().answer_question(
+                            ctx,
+                            st.session_state[chat_key][:-1],
+                            q,
+                        )
+                    st.session_state[chat_key].append({"role": "assistant", "content": answer})
+                    st.rerun(scope="fragment")
+
+    # --- Confirmation prompt (shown when a scenario was detected) ---
+    pending_key = f"pending_confirmation_{asset_key}"
+    pending = st.session_state.get(pending_key)
+    if pending and ar is not None:
+        overrides = pending["overrides"]
+        label = _override_label(overrides)
+        st.info(
+            f"**Scenario detected:** {label}\n\n"
+            "Recalculate the full model with these changes for accurate numbers?"
+        )
+        yes_col, no_col, _ = st.columns([2, 2, 5])
+        with yes_col:
+            if st.button("Yes, recalculate", key=f"confirm_yes_{asset_key}", type="primary"):
+                with st.spinner("Recalculating model..."):
+                    new_assumptions = {**ar.model_results.assumptions_used, **overrides}
+                    scenario_results = ModelExecutor().run(ar.compiled, new_assumptions)
+                scenario_ctx = _build_model_context(_make_scenario_asset_result(ar, scenario_results))
+                kpi_table = _format_scenario_kpi_table(
+                    ar.model_results.kpis, scenario_results.kpis, overrides
+                )
+                with st.spinner("Interpreting results..."):
+                    base_assump = ar.model_results.assumptions_used or {}
+                    changed_lines = "\n".join(
+                        f"  {k}: {base_assump.get(k, '?')} → {v}"
+                        for k, v in overrides.items()
+                    )
+                    base_kpis = ar.model_results.kpis
+                    base_kpi_lines = (
+                        f"  Equity IRR: {base_kpis.equity_irr:.2%}" if base_kpis.equity_irr is not None else ""
+                        + f"\n  Min DSCR: {base_kpis.min_dscr:.3f}x" if base_kpis.min_dscr is not None else ""
+                        + f"\n  NPV equity: {base_kpis.npv_equity:,.0f} INR Lakhs" if base_kpis.npv_equity is not None else ""
+                    )
+                    sc_kpis = scenario_results.kpis
+                    sc_kpi_lines = (
+                        f"  Equity IRR: {sc_kpis.equity_irr:.2%}" if sc_kpis.equity_irr is not None else ""
+                        + f"\n  Min DSCR: {sc_kpis.min_dscr:.3f}x" if sc_kpis.min_dscr is not None else ""
+                        + f"\n  NPV equity: {sc_kpis.npv_equity:,.0f} INR Lakhs" if sc_kpis.npv_equity is not None else ""
+                    )
+                    interpret_q = (
+                        f"A scenario recalculation has been completed. The assumptions were changed as follows:\n"
+                        f"{changed_lines}\n\n"
+                        f"Base-case KPIs (BEFORE the change):\n{base_kpi_lines}\n\n"
+                        f"Scenario KPIs (AFTER the change, which are what the model context reflects):\n{sc_kpi_lines}\n\n"
+                        f"The model context you have been given contains the scenario (post-change) results. "
+                        f"Interpret the impact of these assumption changes on project bankability, "
+                        f"equity returns, and debt coverage. Compare base vs scenario explicitly."
+                    )
+                    answer = DashboardAgent().answer_question(
+                        scenario_ctx,
+                        st.session_state[chat_key][:-1],
+                        interpret_q,
+                    )
+                st.session_state[chat_key].append({"role": "assistant", "content": kpi_table + answer})
+                st.session_state[f"pending_scenario_{asset_key}"] = {
+                    "overrides": overrides,
+                    "results": scenario_results,
+                    "ctx": scenario_ctx,
+                    "label": label,
+                }
+                st.session_state.pop(pending_key, None)
+                st.rerun(scope="fragment")
+        with no_col:
+            if st.button("No, just estimate", key=f"confirm_no_{asset_key}"):
+                with st.spinner("Thinking through the model context..."):
+                    answer = DashboardAgent().answer_question(
+                        ctx,
+                        st.session_state[chat_key][:-1],
+                        pending["question"],
+                    )
+                st.session_state[chat_key].append({"role": "assistant", "content": answer})
+                st.session_state.pop(pending_key, None)
+                st.rerun(scope="fragment")
+
+    # --- "Apply to Dashboard" prompt (shown after a scenario was calculated) ---
+    apply_key = f"pending_scenario_{asset_key}"
+    if st.session_state.get(apply_key) and ar is not None:
+        apply_col, dismiss_col, _ = st.columns([2, 2, 5])
+        with apply_col:
+            if st.button("Apply to Dashboard", key=f"apply_scenario_{asset_key}", type="primary"):
+                st.session_state[f"active_scenario_{asset_key}"] = st.session_state[apply_key]
+                st.session_state.pop(apply_key, None)
+                st.rerun()
+        with dismiss_col:
+            if st.button("Dismiss", key=f"dismiss_scenario_{asset_key}"):
+                st.session_state.pop(apply_key, None)
+                st.rerun(scope="fragment")
+
+    # --- Chat input ---
     if question := st.chat_input(
-        "e.g. What drives the DSCR dip in Year 6?",
+        "e.g. What if tariff was ₹4.8? or What drives the DSCR dip in Year 6?",
         key=f"qa_dialog_input_{asset_key}",
     ):
         st.session_state[chat_key].append({"role": "user", "content": question})
+        if ar is not None:
+            # Detect whether this is a scenario/what-if question
+            with st.spinner("Analysing question..."):
+                sa = ScenarioAgent(
+                    compiled=ar.compiled,
+                    executor=ModelExecutor(),
+                    base_assumptions=ar.model_results.assumptions_used,
+                )
+                overrides = sa.extract_overrides(question)
+            if overrides:
+                # Store for confirmation — don't answer yet
+                st.session_state[pending_key] = {"question": question, "overrides": overrides}
+                st.rerun(scope="fragment")
+        # No overrides (or no ar) — answer directly
         with st.spinner("Thinking through the model context..."):
             answer = DashboardAgent().answer_question(
                 ctx,
@@ -644,32 +874,6 @@ st.markdown("""
 
     .header-action-spacer {
         height: 4.8rem;
-    }
-
-    .qa-fab {
-        position: fixed;
-        right: 1.5rem;
-        bottom: 2.5rem;
-        z-index: 9999;
-    }
-
-    .qa-fab button {
-        background: linear-gradient(135deg, #2a2a2a, #1a1a1a) !important;
-        border: 1px solid var(--line) !important;
-        border-radius: 24px !important;
-        color: var(--ink) !important;
-        font-size: 0.82rem !important;
-        font-weight: 600 !important;
-        padding: 0.55rem 1.1rem !important;
-        box-shadow: 0 4px 18px rgba(0,0,0,0.45) !important;
-        white-space: nowrap !important;
-        cursor: pointer !important;
-        transition: box-shadow 0.18s ease, border-color 0.18s ease !important;
-    }
-
-    .qa-fab button:hover {
-        border-color: var(--accent) !important;
-        box-shadow: 0 6px 24px rgba(0,0,0,0.6) !important;
     }
 
     .qa-launch-spacer {
@@ -910,6 +1114,161 @@ st.markdown("""
         color: var(--ink);
         border: 1px solid rgba(108, 224, 178, 0.14);
     }
+
+    /* Tooltip styles */
+    .tooltip-trigger {
+        position: relative;
+        cursor: help;
+        border-bottom: 1px dotted var(--muted);
+    }
+
+    .tooltip-icon {
+        display: inline-block;
+        width: 14px;
+        height: 14px;
+        line-height: 14px;
+        text-align: center;
+        border-radius: 50%;
+        background: rgba(255, 255, 255, 0.08);
+        color: var(--muted);
+        font-size: 10px;
+        font-weight: 700;
+        margin-left: 0.35rem;
+        transition: background 0.18s ease, color 0.18s ease;
+    }
+
+    .tooltip-trigger:hover .tooltip-icon {
+        background: var(--accent-soft);
+        color: var(--accent);
+    }
+
+    .tooltip-trigger:hover::after {
+        content: attr(title);
+        position: absolute;
+        left: 0;
+        top: 100%;
+        z-index: 9999;
+        max-width: 280px;
+        padding: 0.55rem 0.7rem;
+        border-radius: 12px;
+        background: var(--panel-strong);
+        border: 1px solid var(--line);
+        color: var(--ink);
+        font-size: 0.82rem;
+        line-height: 1.5;
+        box-shadow: 0 10px 28px rgba(0, 0, 0, 0.35);
+        pointer-events: none;
+    }
+
+    /* Chart download button */
+    .chart-download-btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        border: 1px solid var(--line);
+        background: rgba(255, 255, 255, 0.04);
+        color: var(--muted);
+        font-size: 14px;
+        cursor: pointer;
+        transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease;
+    }
+
+    .chart-download-btn:hover {
+        background: var(--accent-soft);
+        border-color: var(--accent);
+        color: var(--accent);
+    }
+
+    .chart-download-btn::before {
+        content: "⬇";
+    }
+
+    /* Suggested questions styles */
+    .suggested-questions-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.1em;
+        text-transform: uppercase;
+        color: var(--muted);
+        margin-bottom: 0.55rem;
+        margin-top: 0.85rem;
+    }
+
+    div[data-testid="stButton"] button[id^="suggested_q_"] {
+        background: rgba(255, 255, 255, 0.03) !important;
+        border: 1px dashed rgba(255, 255, 255, 0.12) !important;
+        border-radius: 14px !important;
+        color: var(--muted) !important;
+        font-size: 0.84rem !important;
+        font-weight: 600 !important;
+        padding: 0.6rem 0.75rem !important;
+        box-shadow: none !important;
+        transition: background 0.18s ease, border-color 0.18s ease, color 0.18s ease !important;
+    }
+
+    div[data-testid="stButton"] button[id^="suggested_q_"]:hover {
+        background: var(--accent-soft) !important;
+        border-color: var(--accent) !important;
+        color: var(--accent) !important;
+    }
+
+    /* Keyboard shortcuts styles */
+    .shortcuts-grid {
+        display: grid;
+        gap: 0.65rem;
+        padding: 0.5rem 0;
+    }
+
+    .shortcut-row {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        padding: 0.45rem 0;
+    }
+
+    .shortcut-key {
+        display: inline-block;
+        min-width: 90px;
+        padding: 0.38rem 0.65rem;
+        border-radius: 10px;
+        background: rgba(255, 255, 255, 0.06);
+        border: 1px solid var(--line);
+        color: var(--accent);
+        font-family: "Manrope", monospace;
+        font-size: 0.82rem;
+        font-weight: 700;
+        text-align: center;
+        box-shadow: 0 2px 6px rgba(0, 0, 0, 0.18);
+    }
+
+    .shortcut-desc {
+        color: var(--muted);
+        font-size: 0.88rem;
+        line-height: 1.5;
+    }
+
+    /* Smooth transitions for tabs and cards */
+    .summary-card,
+    .asset-dashboard-hero,
+    .mini-card {
+        transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .summary-card:hover,
+    .asset-dashboard-hero:hover {
+        transform: translateY(-2px);
+        box-shadow: 0 18px 42px rgba(0, 0, 0, 0.32);
+    }
+
+    /* Asset icon styling */
+    .summary-card-header {
+        display: flex;
+        align-items: center;
+        gap: 0.45rem;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -1053,9 +1412,12 @@ if run_btn:
 
     st.session_state["latest_results"] = results
     st.session_state["latest_excel_bytes"] = excel_bytes
-    # Invalidate cached dashboard context so it is rebuilt for the new run
+    # Invalidate cached dashboard context and any active scenarios
     st.session_state.pop("model_context", None)
     st.session_state.pop("chart_specs", None)
+    for key in list(st.session_state.keys()):
+        if key.startswith(("active_scenario_", "pending_scenario_", "pending_confirmation_")):
+            st.session_state.pop(key, None)
 
 results = st.session_state.get("latest_results")
 excel_bytes = st.session_state.get("latest_excel_bytes")
@@ -1121,21 +1483,43 @@ if results:
             use_container_width=True,
         )
 
-    asset_tabs = st.tabs([ar.spec.name for ar in results])
+    asset_tabs = st.tabs([f"{_get_asset_icon(ar.spec.asset_type)} {ar.spec.name}" for ar in results])
     for idx, (tab, ar) in enumerate(zip(asset_tabs, results)):
         with tab:
             asset_key = _asset_ui_key(ar, idx)
             ctx      = ctx_cache[asset_key]
             ai_specs = spec_cache.get(asset_key, {"charts": []})
-            _render_asset_dashboard_intro(ar, ctx)
 
-            st.markdown('<div class="qa-fab">', unsafe_allow_html=True)
-            if st.button("Asset Q&A", key=f"open_qa_{asset_key}"):
-                _render_asset_qa_dialog(asset_key, ar.spec.name, ctx)
-            st.markdown('</div>', unsafe_allow_html=True)
+            # Scenario override: swap ar/ctx if user applied a scenario from Q&A
+            active_scenario = st.session_state.get(f"active_scenario_{asset_key}")
+            if active_scenario:
+                display_ar  = _make_scenario_asset_result(ar, active_scenario["results"])
+                display_ctx = active_scenario["ctx"]
+                sc_reset_col, sc_label_col = st.columns([1, 5])
+                with sc_reset_col:
+                    if st.button("↩ Base case", key=f"reset_scenario_{asset_key}"):
+                        st.session_state.pop(f"active_scenario_{asset_key}", None)
+                        st.rerun()
+                with sc_label_col:
+                    st.info(f"**Scenario view:** {active_scenario['label']}")
+            else:
+                display_ar  = ar
+                display_ctx = ctx
+
+            intro_col, qa_col = st.columns([4.8, 1.15], gap="large")
+            with intro_col:
+                _render_asset_dashboard_intro(display_ar, display_ctx)
+            with qa_col:
+                st.markdown('<div class="qa-launch-spacer"></div>', unsafe_allow_html=True)
+                if st.button(
+                    "Asset Q&A",
+                    key=f"open_qa_{asset_key}",
+                    use_container_width=True,
+                ):
+                    _render_asset_qa_dialog(asset_key, ar.spec.name, display_ctx, ar)
 
             # 1. Standard charts
-            _render_standard_charts(ar, ctx)
+            _render_standard_charts(display_ar, display_ctx)
 
             # 2. AI-suggested additional charts
             extra_charts = ai_specs.get("charts", [])
@@ -1146,4 +1530,29 @@ if results:
                     '<div class="panel-subtitle">Extra diagnostics suggested from the asset context and KPI profile.</div>',
                     unsafe_allow_html=True,
                 )
-                _render_ai_charts(ctx, ai_specs)
+                _render_ai_charts(display_ctx, ai_specs)
+
+    # -----------------------------------------------------------------------
+    # Keyboard shortcuts info
+    # -----------------------------------------------------------------------
+    st.divider()
+    with st.expander("Keyboard Shortcuts", expanded=False):
+        shortcuts = [
+            ("Ctrl + Enter", "Run the financial model"),
+            ("Ctrl + D", "Download Excel workbook"),
+            ("← / →", "Switch between asset tabs"),
+            ("?", "Toggle this shortcuts panel"),
+        ]
+        shortcut_rows = "".join(
+            (
+                '<div class="shortcut-row">'
+                f'<kbd class="shortcut-key">{keys}</kbd>'
+                f'<span class="shortcut-desc">{desc}</span>'
+                "</div>"
+            )
+            for keys, desc in shortcuts
+        )
+        st.markdown(
+            f'<div class="shortcuts-grid">{shortcut_rows}</div>',
+            unsafe_allow_html=True,
+        )

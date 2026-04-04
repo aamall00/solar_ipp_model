@@ -195,7 +195,10 @@ _SINGLE_RUN_SYSTEM = """You are a financial-model assistant for a solar IPP proj
 Translate the user's scenario description into assumption overrides and call run_model once.
 Use decimal form for rates (e.g. 0.22 for 22% CUF, 0.0975 for 9.75% interest).
 Only override assumptions that the user explicitly wants to change.
-Do NOT perform any arithmetic — just identify the overrides."""
+When base-case assumption values are provided, you MUST compute absolute override values from
+relative descriptions (e.g. "20% increase" on a base tariff of 3.2 → override tariff = 3.84;
+"150bps higher rate" on a base rate of 0.0975 → override interest_rate = 0.1125).
+If the question is purely analytical (no assumption changes implied), do NOT call run_model."""
 
 # Tool for proposing scenarios
 _PROPOSE_SCENARIOS_TOOL: Dict[str, Any] = {
@@ -403,7 +406,7 @@ class ScenarioAgent:
         -------
         (ModelResults, narrative_str | None)
         """
-        overrides = self._extract_overrides(scenario_description)
+        overrides = self.extract_overrides(scenario_description)
         assumptions = {**self.base_assumptions, **overrides}
         results = self.executor.run(self.compiled, assumptions)
 
@@ -421,8 +424,27 @@ class ScenarioAgent:
     # Private: single-run NL extraction
     # ------------------------------------------------------------------
 
-    def _extract_overrides(self, scenario_description: str) -> Dict[str, Any]:
-        messages = [{"role": "user", "content": scenario_description}]
+    def extract_overrides(self, scenario_description: str) -> Dict[str, Any]:
+        """
+        Parse a natural-language scenario description and return a dict of
+        assumption overrides (e.g. {"tariff": 4.8, "cuf": 0.18}).
+        Returns an empty dict if no overrides are detected or if the question
+        is purely analytical with no assumption changes.
+
+        Base assumptions (self.base_assumptions) are included in the prompt so
+        that Claude can resolve relative descriptions ("20% higher tariff") into
+        absolute override values.
+        """
+        # Build a base-assumptions context block so Claude can compute absolute values
+        base_ctx = ""
+        if self.base_assumptions:
+            base_lines = "\n".join(
+                f"  {k}: {v}" for k, v in sorted(self.base_assumptions.items())
+            )
+            base_ctx = f"\nCurrent base-case assumption values:\n{base_lines}\n"
+
+        user_content = f"{base_ctx}\nUser question: {scenario_description}"
+        messages = [{"role": "user", "content": user_content}]
         response = self.client.messages.create(
             model=self.model,
             max_tokens=1024,
