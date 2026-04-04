@@ -5,7 +5,7 @@ assumption contexts, and display metadata.
 Adding a new asset type:
   1. Add an entry to ASSET_REGISTRY.
   2. Create blocks/<asset_type>/ with at minimum generation.yaml and revenue.yaml.
-  3. Add a canonical assumption schema in assumption_agent.py.
+  3. Add dsl/assumption_schemas/<asset_type>.yaml with aliases and descriptions.
   4. Add the block_library key to DSLParser._resolve_block_import.
 """
 

@@ -1,4 +1,5 @@
 assumptions:
+  # ---- Generation (wind-specific) ----
   - name: capacity_mw
     type: scalar
     unit: MW
@@ -6,10 +7,19 @@ assumptions:
     constraints:
       min: 1.0
       max: 5000.0
+    aliases:
+      - installed_capacity_mw
+      - plant_capacity
+      - dc_capacity_mw
+      - ac_capacity_mw
+      - capacity
+      - size_mw
+      - mw
+    description: "Installed AC capacity in megawatts"
 
   - name: capacity_factor
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.30
     constraints:
       min: 0.15
@@ -18,26 +28,49 @@ assumptions:
       vary: true
       range_pct: 0.10
       distribution: triangular
+    aliases:
+      - cf
+      - wind_cf
+      - wind_capacity_factor
+      - annual_yield
+      - plant_load_factor
+      - plf
+      - cuf
+    description: "P50 annual capacity factor as a decimal (e.g. 0.30 for 30%)"
 
   - name: availability_factor
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.95
     constraints:
       min: 0.80
       max: 0.99
+    aliases:
+      - turbine_availability
+      - machine_availability
+      - availability
+      - pa
+      - plant_availability
+    description: "Annual turbine availability factor as a decimal (e.g. 0.95 for 95%)"
 
   - name: auxiliary_consumption
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.005
     constraints:
       min: 0.0
       max: 0.05
+    aliases:
+      - aux_consumption
+      - auxiliary_losses
+      - transformer_losses
+      - internal_consumption
+    description: "Fraction of gross generation consumed internally"
 
+  # ---- Revenue ----
   - name: tariff
     type: scalar
-    unit: INR_per_kWh
+    unit: INR per kWh
     value: 2.65
     constraints:
       min: 0.50
@@ -46,14 +79,28 @@ assumptions:
       vary: true
       range_pct: 0.10
       distribution: triangular
+    aliases:
+      - ppa_tariff
+      - tariff_per_kwh
+      - ppa_rate
+      - feed_in_tariff
+      - fit
+      - contracted_tariff
+      - levelised_tariff
+    description: "PPA tariff in INR per kWh"
 
   - name: tariff_escalation
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.0
     constraints:
       min: 0.0
       max: 0.10
+    aliases:
+      - ppa_escalation
+      - tariff_escalation_rate
+      - annual_tariff_increase
+    description: "Annual PPA tariff escalation rate as a decimal (0 = fixed tariff)"
 
   - name: ppa_tenor_years
     type: scalar
@@ -62,10 +109,17 @@ assumptions:
     constraints:
       min: 10.0
       max: 35.0
+    aliases:
+      - ppa_duration
+      - ppa_life
+      - contract_duration
+      - offtake_term
+    description: "Duration of the PPA in years (determines operations_periods)"
 
+  # ---- Capex (wind defaults differ from solar) ----
   - name: capex_per_mw
     type: scalar
-    unit: INR_Lakhs_per_MW
+    unit: INR Lakhs per MW
     value: 700.0
     constraints:
       min: 300.0
@@ -74,15 +128,35 @@ assumptions:
       vary: true
       range_pct: 0.10
       distribution: triangular
+    aliases:
+      - capex_per_mw_lakh
+      - specific_capex
+      - unit_cost
+      - epc_cost_per_mw
+      - cost_per_mw
+    description: >-
+      Total project capex per MW in INR Lakhs/MW (wind: typically 600-900 Lakh/MW).
+      If user gives total_capex in Lakhs, divide by capacity_mw.
+      If user gives total_capex in Crores, convert: 1 Cr = 100 Lakh.
 
   - name: capex_schedule
     type: time_series
-    unit: fraction
+    unit: fractions summing to 1.0
     value: [0.25, 0.25, 0.25, 0.25]
+    aliases:
+      - construction_drawdown
+      - capex_drawdown_schedule
+      - construction_schedule
+      - drawdown_schedule
+    description: >-
+      List of fractions per construction quarter summing to 1.0.
+      E.g. [0.25, 0.25, 0.25, 0.25] for 4 equal quarterly draws.
+      Length determines construction_periods.
 
+  # ---- O&M (wind defaults differ from solar) ----
   - name: opex_per_mw_pa
     type: scalar
-    unit: INR_Lakhs_per_MW_per_year
+    unit: INR Lakhs per MW per year
     value: 20.0
     constraints:
       min: 1.0
@@ -91,26 +165,49 @@ assumptions:
       vary: true
       range_pct: 0.20
       distribution: triangular
+    aliases:
+      - om_cost_per_mw
+      - annual_opex_per_mw
+      - maintenance_cost
+      - opex_lakh_per_mw
+      - amc_per_mw
+    description: "Annual O&M cost per MW in INR Lakhs (wind: typically 15-30 Lakh/MW/yr)"
 
   - name: opex_escalation
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.03
     constraints:
       min: 0.0
       max: 0.10
+    aliases:
+      - om_escalation
+      - opex_inflation
+      - annual_opex_increase
+    description: "Annual O&M cost escalation rate as a decimal"
 
+  # ---- Debt ----
   - name: debt_pct
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.70
     constraints:
       min: 0.30
       max: 0.85
+    aliases:
+      - debt_percent
+      - leverage
+      - debt_equity_ratio
+      - loan_to_cost
+      - ltc
+      - debt_fraction
+    description: >-
+      Senior debt as a fraction of total project cost (e.g. 0.70 for 70:30 D:E).
+      If user states D:E as 70:30 this is 0.70.
 
   - name: interest_rate
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.0975
     constraints:
       min: 0.04
@@ -119,6 +216,13 @@ assumptions:
       vary: true
       range_pct: 0.15
       distribution: triangular
+    aliases:
+      - loan_interest_rate
+      - coupon_rate
+      - borrowing_rate
+      - interest_pa
+      - cost_of_debt
+    description: "Annual interest rate on senior debt as a decimal (e.g. 0.0975 for 9.75%)"
 
   - name: debt_tenor_years
     type: scalar
@@ -127,6 +231,13 @@ assumptions:
     constraints:
       min: 5.0
       max: 25.0
+    aliases:
+      - loan_tenor
+      - debt_maturity_years
+      - repayment_period
+      - loan_life
+      - loan_term
+    description: "Debt tenor in years from COD (determines debt_maturity milestone)"
 
   - name: moratorium_periods
     type: scalar
@@ -135,6 +246,12 @@ assumptions:
     constraints:
       min: 0.0
       max: 8.0
+    aliases:
+      - repayment_holiday
+      - grace_periods
+      - principal_holiday
+      - moratorium_quarters
+    description: "Number of quarterly periods after COD before principal repayment begins"
 
   - name: debt_repayment_periods
     type: scalar
@@ -146,19 +263,32 @@ assumptions:
 
   - name: dscr_target
     type: scalar
-    unit: ratio
+    unit: ratio (×)
     value: 1.20
     constraints:
       min: 1.0
       max: 2.5
+    aliases:
+      - minimum_dscr
+      - dscr_covenant
+      - target_dscr
+      - lender_dscr
+      - sculpting_target
+    description: "Target DSCR for debt sculpting; also minimum covenant threshold"
 
   - name: debt_sizing_mode
     type: scalar
-    unit: flag
+    unit: flag (0.0 or 1.0)
     value: 0.0
     constraints:
       min: 0.0
       max: 1.0
+    aliases:
+      - sculpting_mode
+      - debt_structure
+    description: >-
+      0.0 = cost-based (equal principal), 1.0 = CFADS-based sculpted.
+      Set to 1.0 if user mentions 'sculpted debt service' or 'DSCR-shaped repayment'.
 
   - name: dsra_months
     type: scalar
@@ -167,106 +297,225 @@ assumptions:
     constraints:
       min: 0.0
       max: 12.0
+    aliases:
+      - dsra
+      - debt_service_reserve
+      - reserve_months
+      - dsra_cover
+      - debt_reserve_months
+    description: "DSRA target expressed as number of months of forward debt service"
 
   - name: cash_sweep_rate
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.0
     constraints:
       min: 0.0
       max: 1.0
+    aliases:
+      - sweep_rate
+      - cash_sweep
+      - excess_cash_sweep
+      - debt_sweep_rate
+      - mandatory_prepayment_rate
+    description: >-
+      Fraction of post-DSRA excess cash swept to accelerate debt repayment.
+      0.0 = no sweep (all residual to equity); 1.0 = full sweep until debt retired.
 
+  # ---- Tax & Depreciation ----
   - name: tax_rate
     type: scalar
-    unit: ratio
+    unit: ratio (decimal)
     value: 0.25
     constraints:
       min: 0.0
       max: 0.40
+    aliases:
+      - corporate_tax
+      - income_tax_rate
+      - effective_tax_rate
+      - tax_percent
+    description: "Corporate income tax rate as a decimal (e.g. 0.25 for 25%)"
 
   - name: depreciation_rate
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.05
     constraints:
       min: 0.02
       max: 0.40
-
-  - name: insurance_percent_of_capex
-    type: scalar
-    unit: ratio
-    value: 0.005
-    constraints:
-      min: 0.0
-      max: 0.02
-
-  - name: land_lease_lakhs_pa
-    type: scalar
-    unit: INR_Lakhs_per_year
-    value: 0.0
-    constraints:
-      min: 0.0
-      max: 500.0
-
-  - name: maintenance_capex_pct
-    type: scalar
-    unit: ratio
-    value: 0.0
-    constraints:
-      min: 0.0
-      max: 0.10
+    aliases:
+      - slm_rate
+      - depreciation_percent
+      - book_depreciation
+      - useful_life_years
+    description: >-
+      SLM depreciation rate as a decimal (e.g. 0.05 for 5%/yr = 20-yr life).
+      If user gives useful life in years, convert: rate = 1/life.
 
   - name: depreciation_method
     type: enum
-    unit: string
+    unit: string (slm or wdv)
     value: slm
+    enum_values:
+      - slm
+      - wdv
+    aliases:
+      - dep_method
+      - depreciation_type
+      - book_dep_method
+      - depreciation_basis
+    description: >-
+      Depreciation method for P&L and tax:
+      'slm' = straight-line method (default, 5% p.a. over 20 yrs),
+      'wdv' = written-down value / declining balance (40% p.a. — Indian solar benefit).
 
   - name: wdv_rate
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.40
     constraints:
       min: 0.05
       max: 0.80
+    aliases:
+      - wdv_depreciation_rate
+      - written_down_value_rate
+      - block_rate
+      - declining_balance_rate
+      - wdv_percent
+    description: >-
+      Annual WDV depreciation rate as a decimal
+      (e.g. 0.40 for 40% p.a. — standard Indian Income Tax Act rate for solar plants).
+      Only used when depreciation_method = 'wdv'.
 
   - name: use_wdv
     type: scalar
-    unit: flag
+    unit: flag (0.0 or 1.0)
     default_rule: "= 1.0 * (depreciation_method == 'wdv')"
     constraints:
       min: 0.0
       max: 1.0
 
+  # ---- O&M sub-components ----
+  - name: insurance_percent_of_capex
+    type: scalar
+    unit: ratio (decimal, e.g. 0.005 for 0.5% p.a.)
+    value: 0.005
+    constraints:
+      min: 0.0
+      max: 0.02
+    aliases:
+      - insurance_rate
+      - insurance_percent
+      - property_insurance
+      - insurance_of_capex
+      - annual_insurance
+    description: >-
+      Annual insurance premium as a fraction of total project capex
+      (e.g. 0.005 for 0.5%/yr — typical for Indian solar IPP).
+
+  - name: land_lease_lakhs_pa
+    type: scalar
+    unit: INR Lakhs per year
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 500.0
+    aliases:
+      - land_lease
+      - land_rent
+      - ground_rent
+      - land_cost_pa
+      - annual_land_lease
+      - lease_rentals
+    description: >-
+      Annual land lease payment in INR Lakhs.
+      Use 0 if land is owned outright.
+
+  - name: maintenance_capex_pct
+    type: scalar
+    unit: ratio (decimal, e.g. 0.005 for 0.5% p.a.)
+    value: 0.0
+    constraints:
+      min: 0.0
+      max: 0.10
+    aliases:
+      - capex_during_ops
+      - capex_during_ops_pct
+      - maintenance_capex
+      - major_maintenance_capex
+      - replacement_capex_pct
+      - capex_maintenance_rate
+    description: >-
+      Annual capital expenditure during operations as a fraction of total project capex.
+      Deducted from CFADS: CFADS = EBITDA - Tax - capex_during_ops.
+
+  # ---- Equity ----
   - name: equity_irr_target
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.14
     constraints:
       min: 0.08
       max: 0.35
+    aliases:
+      - hurdle_rate
+      - equity_hurdle
+      - required_irr
+      - minimum_equity_irr
+      - irr_target
+    description: "Equity IRR hurdle rate used for NPV discounting and bankability tests"
 
+  # ---- Optional feature flags ----
   - name: has_revenue_subsidy
     type: scalar
-    unit: flag
+    unit: flag (0.0 or 1.0)
     value: 0.0
     constraints:
       min: 0.0
       max: 1.0
+    aliases:
+      - viability_gap_funding
+      - vgf
+      - generation_subsidy
+      - rec_income
+      - renewable_energy_certificate
+      - state_subsidy
+      - subsidy_income
+      - has_vgf
+      - has_subsidy
+      - has_rec
+    description: >-
+      Set to 1.0 if the project receives a generation-linked revenue subsidy
+      (VGF, REC, state incentive, etc.). When 1.0, the revenue_subsidy_block
+      is included and subsidy_per_kwh / subsidy_escalation must be provided.
 
   - name: subsidy_per_kwh
     type: scalar
-    unit: INR_per_kWh
+    unit: INR per kWh
     value: 0.0
     constraints:
       min: 0.0
       max: 5.0
     include_when: "has_revenue_subsidy == 1.0"
+    aliases:
+      - vgf_per_kwh
+      - subsidy_rate
+      - generation_subsidy_rate
+      - rec_price
+      - rec_per_kwh
+      - incentive_per_kwh
+    description: "Per-unit generation subsidy in INR/kWh (e.g. 0.50 for Rs.0.50/kWh VGF)."
 
   - name: subsidy_escalation
     type: scalar
-    unit: per_year
+    unit: per_year (decimal)
     value: 0.0
     constraints:
       min: 0.0
       max: 0.10
     include_when: "has_revenue_subsidy == 1.0"
+    aliases:
+      - vgf_escalation
+      - subsidy_growth_rate
+    description: "Annual escalation rate for the subsidy payment (0.0 = fixed nominal)."

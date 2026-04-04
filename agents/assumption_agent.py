@@ -48,432 +48,31 @@ from dsl.assumption_schema_library import load_assumption_schema_entries
 from dsl.types import ValidationResult, ValidationWarning
 
 # ---------------------------------------------------------------------------
-# Canonical assumption schema
+# Benchmark defaults — logged when applied so callers can see them
 # ---------------------------------------------------------------------------
-# Each entry:
-#   type        : "scalar" | "schedule"
-#   unit        : human-readable unit string
-#   default     : default value (None = required, must be supplied)
-#   aliases     : alternative names Claude might use
-#   constraints : min/max bounds (None = unbounded)
-#   sensitivity : sensitivity analysis config
-#   description : shown to Claude in the tool schema
-
-_CANONICAL: Dict[str, Dict[str, Any]] = {
-    # ---- Generation ----
-    "capacity_mw": {
-        "type": "scalar", "unit": "MW",
-        "default": 100.0,  # benchmark default: 100 MW Indian IPP — overridden when Claude extracts a value
-        "aliases": ["installed_capacity_mw", "plant_capacity", "dc_capacity_mw",
-                    "ac_capacity_mw", "capacity", "size_mw", "mw"],
-        "constraints": {"min": 1.0, "max": 5000.0},
-        "description": "Installed AC capacity in megawatts",
-    },
-    "cuf": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.22,
-        "aliases": ["capacity_utilisation_factor", "capacity_factor", "cuf_p50",
-                    "plant_load_factor", "plf", "yield", "annual_yield"],
-        "constraints": {"min": 0.10, "max": 0.40},
-        "sensitivity": {"vary": True, "range_pct": 0.10, "distribution": "triangular"},
-        "description": "P50 capacity utilisation factor as a decimal (e.g. 0.22 for 22%)",
-    },
-    "degradation_rate": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.005,
-        "aliases": ["annual_degradation", "panel_degradation", "module_degradation"],
-        "constraints": {"min": 0.0, "max": 0.02},
-        "description": "Annual generation degradation rate as a decimal (e.g. 0.005 for 0.5%/yr)",
-    },
-    "auxiliary_consumption": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.005,
-        "aliases": ["aux_consumption", "auxiliary_losses", "transformer_losses",
-                    "internal_consumption"],
-        "constraints": {"min": 0.0, "max": 0.05},
-        "description": "Fraction of gross generation consumed internally",
-    },
-    # ---- Revenue ----
-    "tariff": {
-        "type": "scalar", "unit": "INR per kWh",
-        "default": 2.65,  # benchmark default: Rs.2.65/kWh Karnataka solar — overridden when Claude extracts a value
-        "aliases": ["ppa_tariff", "tariff_per_kwh", "ppa_rate", "feed_in_tariff",
-                    "fit", "contracted_tariff", "levelised_tariff"],
-        "constraints": {"min": 0.50, "max": 15.0},
-        "sensitivity": {"vary": True, "range_pct": 0.10, "distribution": "triangular"},
-        "description": "PPA tariff in INR per kWh",
-    },
-    "tariff_escalation": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.0,
-        "aliases": ["ppa_escalation", "tariff_escalation_rate", "annual_tariff_increase"],
-        "constraints": {"min": 0.0, "max": 0.10},
-        "description": "Annual PPA tariff escalation rate as a decimal (0 = fixed tariff)",
-    },
-    "ppa_tenor_years": {
-        "type": "scalar", "unit": "years",
-        "default": 25.0,
-        "aliases": ["ppa_duration", "ppa_life", "contract_duration", "offtake_term"],
-        "constraints": {"min": 10.0, "max": 35.0},
-        "description": "Duration of the PPA in years (determines operations_periods)",
-    },
-    # ---- Capex ----
-    "capex_per_mw": {
-        "type": "scalar", "unit": "INR Lakhs per MW",
-        "default": 450.0,  # benchmark default: Rs.450 Lakh/MW Indian solar 2024 — overridden when Claude extracts a value
-        "aliases": ["capex_per_mw_lakh", "specific_capex", "unit_cost",
-                    "epc_cost_per_mw", "cost_per_mw"],
-        "constraints": {"min": 150.0, "max": 1000.0},
-        "sensitivity": {"vary": True, "range_pct": 0.10, "distribution": "triangular"},
-        "description": (
-            "Total project capex per MW in INR Lakhs/MW. "
-            "If user gives total_capex in Lakhs, divide by capacity_mw. "
-            "If user gives total_capex in Crores, convert: 1 Cr = 100 Lakh."
-        ),
-    },
-    "capex_schedule": {
-        "type": "schedule", "unit": "fractions summing to 1.0",
-        "default": None,  # derived from construction_periods if not given
-        "aliases": ["construction_drawdown", "capex_drawdown_schedule",
-                    "construction_schedule", "drawdown_schedule"],
-        "description": (
-            "List of fractions per construction quarter summing to 1.0. "
-            "E.g. [0.25, 0.25, 0.25, 0.25] for 4 equal quarterly draws. "
-            "Length determines construction_periods."
-        ),
-    },
-    # ---- O&M ----
-    "opex_per_mw_pa": {
-        "type": "scalar", "unit": "INR Lakhs per MW per year",
-        "default": 8.0,
-        "aliases": ["om_cost_per_mw", "annual_opex_per_mw", "maintenance_cost",
-                    "opex_lakh_per_mw", "amc_per_mw"],
-        "constraints": {"min": 1.0, "max": 50.0},
-        "sensitivity": {"vary": True, "range_pct": 0.20, "distribution": "triangular"},
-        "description": "Annual O&M cost per MW in INR Lakhs",
-    },
-    "opex_escalation": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.03,
-        "aliases": ["om_escalation", "opex_inflation", "annual_opex_increase"],
-        "constraints": {"min": 0.0, "max": 0.10},
-        "description": "Annual O&M cost escalation rate as a decimal",
-    },
-    # ---- Debt ----
-    "debt_pct": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.70,
-        "aliases": ["debt_percent", "leverage", "debt_equity_ratio",
-                    "loan_to_cost", "ltc", "debt_fraction"],
-        "constraints": {"min": 0.30, "max": 0.85},
-        "description": (
-            "Senior debt as a fraction of total project cost (e.g. 0.70 for 70:30 D:E). "
-            "If user states D:E as 70:30 this is 0.70."
-        ),
-    },
-    "interest_rate": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.0975,  # benchmark default: 9.75% p.a. typical Indian project finance — overridden when Claude extracts a value
-        "aliases": ["loan_interest_rate", "coupon_rate", "borrowing_rate",
-                    "interest_pa", "cost_of_debt"],
-        "constraints": {"min": 0.04, "max": 0.25},
-        "sensitivity": {"vary": True, "range_pct": 0.15, "distribution": "triangular"},
-        "description": "Annual interest rate on senior debt as a decimal (e.g. 0.0975 for 9.75%)",
-    },
-    "debt_tenor_years": {
-        "type": "scalar", "unit": "years",
-        "default": 18.0,
-        "aliases": ["loan_tenor", "debt_maturity_years", "repayment_period",
-                    "loan_life", "loan_term"],
-        "constraints": {"min": 5.0, "max": 25.0},
-        "description": "Debt tenor in years from COD (determines debt_maturity milestone)",
-    },
-    "moratorium_periods": {
-        "type": "scalar", "unit": "quarters",
-        "default": 0.0,
-        "aliases": ["repayment_holiday", "grace_periods", "principal_holiday",
-                    "moratorium_quarters"],
-        "constraints": {"min": 0.0, "max": 8.0},
-        "description": "Number of quarterly periods after COD before principal repayment begins",
-    },
-    "dscr_target": {
-        "type": "scalar", "unit": "ratio (×)",
-        "default": 1.20,
-        "aliases": ["minimum_dscr", "dscr_covenant", "target_dscr",
-                    "lender_dscr", "sculpting_target"],
-        "constraints": {"min": 1.0, "max": 2.5},
-        "description": "Target DSCR for debt sculpting; also minimum covenant threshold",
-    },
-    "debt_sizing_mode": {
-        "type": "scalar", "unit": "flag (0.0 or 1.0)",
-        "default": 0.0,
-        "aliases": ["sculpting_mode", "debt_structure"],
-        "constraints": {"min": 0.0, "max": 1.0},
-        "description": (
-            "0.0 = cost-based (equal principal), 1.0 = CFADS-based sculpted. "
-            "Set to 1.0 if user mentions 'sculpted debt service' or 'DSCR-shaped repayment'."
-        ),
-    },
-    "dsra_months": {
-        "type": "scalar", "unit": "months",
-        "default": 6.0,
-        "aliases": ["dsra", "debt_service_reserve", "reserve_months",
-                    "dsra_cover", "debt_reserve_months"],
-        "constraints": {"min": 0.0, "max": 12.0},
-        "description": "DSRA target expressed as number of months of forward debt service",
-    },
-    "cash_sweep_rate": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.0,
-        "aliases": ["sweep_rate", "cash_sweep", "excess_cash_sweep",
-                    "debt_sweep_rate", "mandatory_prepayment_rate"],
-        "constraints": {"min": 0.0, "max": 1.0},
-        "description": (
-            "Fraction of post-DSRA excess cash swept to accelerate debt repayment. "
-            "0.0 = no sweep (all residual to equity); 1.0 = full sweep until debt retired."
-        ),
-    },
-    # ---- Tax & Depreciation ----
-    "tax_rate": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.25,
-        "aliases": ["corporate_tax", "income_tax_rate", "effective_tax_rate",
-                    "tax_percent"],
-        "constraints": {"min": 0.0, "max": 0.40},
-        "description": "Corporate income tax rate as a decimal (e.g. 0.25 for 25%)",
-    },
-    "depreciation_rate": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.05,
-        "aliases": ["slm_rate", "depreciation_percent", "book_depreciation",
-                    "useful_life_years"],  # if years given, convert: 1/years
-        "constraints": {"min": 0.02, "max": 0.40},
-        "description": (
-            "SLM depreciation rate as a decimal (e.g. 0.05 for 5%/yr = 20-yr life). "
-            "If user gives useful life in years, convert: rate = 1/life."
-        ),
-    },
-    # ---- Equity ----
-    "equity_irr_target": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.14,
-        "aliases": ["hurdle_rate", "equity_hurdle", "required_irr",
-                    "minimum_equity_irr", "irr_target"],
-        "constraints": {"min": 0.08, "max": 0.35},
-        "description": "Equity IRR hurdle rate used for NPV discounting and bankability tests",
-    },
-    # ---- O&M sub-components ----
-    "insurance_percent_of_capex": {
-        "type": "scalar", "unit": "ratio (decimal, e.g. 0.005 for 0.5% p.a.)",
-        "default": 0.005,
-        "aliases": ["insurance_rate", "insurance_percent", "property_insurance",
-                    "insurance_of_capex", "annual_insurance"],
-        "constraints": {"min": 0.0, "max": 0.02},
-        "description": (
-            "Annual insurance premium as a fraction of total project capex "
-            "(e.g. 0.005 for 0.5%/yr — typical for Indian solar IPP)."
-        ),
-    },
-    "land_lease_lakhs_pa": {
-        "type": "scalar", "unit": "INR Lakhs per year",
-        "default": 0.0,
-        "aliases": ["land_lease", "land_rent", "ground_rent", "land_cost_pa",
-                    "annual_land_lease", "lease_rentals"],
-        "constraints": {"min": 0.0, "max": 500.0},
-        "description": (
-            "Annual land lease payment in INR Lakhs. "
-            "Use 0 if land is owned outright (common for large Karnataka projects)."
-        ),
-    },
-    "maintenance_capex_pct": {
-        "type": "scalar", "unit": "ratio (decimal, e.g. 0.005 for 0.5% p.a.)",
-        "default": 0.0,
-        "aliases": ["capex_during_ops", "capex_during_ops_pct", "maintenance_capex",
-                    "major_maintenance_capex", "replacement_capex_pct",
-                    "inverter_replacement_pct", "capex_maintenance_rate"],
-        "constraints": {"min": 0.0, "max": 0.10},
-        "description": (
-            "Annual capital expenditure during operations as a fraction of total project capex "
-            "(e.g. 0.005 for 0.5%/yr to provision for inverter and component replacement). "
-            "Deducted from CFADS: CFADS = EBITDA − Tax − capex_during_ops."
-        ),
-    },
-    # ---- Depreciation method ----
-    "depreciation_method": {
-        "type": "enum", "unit": "string (slm or wdv)",
-        "default": "slm",
-        "aliases": ["dep_method", "depreciation_type", "book_dep_method",
-                    "depreciation_basis"],
-        "constraints": {},
-        "enum_values": ["slm", "wdv"],
-        "description": (
-            "Depreciation method for P&L and tax: "
-            "'slm' = straight-line method (default, 5% p.a. over 20 yrs), "
-            "'wdv' = written-down value / declining balance (40% p.a. — Indian solar benefit)."
-        ),
-    },
-    "wdv_rate": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.40,
-        "aliases": ["wdv_depreciation_rate", "written_down_value_rate", "block_rate",
-                    "declining_balance_rate", "wdv_percent"],
-        "constraints": {"min": 0.05, "max": 0.80},
-        "description": (
-            "Annual WDV depreciation rate as a decimal "
-            "(e.g. 0.40 for 40% p.a. — standard Indian Income Tax Act rate for solar plants). "
-            "Only used when depreciation_method = 'wdv'."
-        ),
-    },
-    "use_wdv": {
-        "type": "scalar", "unit": "flag (0.0 or 1.0)",
-        "default": 0.0,
-        "aliases": [],
-        "constraints": {"min": 0.0, "max": 1.0},
-        "description": (
-            "Numeric flag derived from depreciation_method: 0.0 = SLM, 1.0 = WDV. "
-            "Set automatically by _derive_cross_assumptions; do not set directly."
-        ),
-    },
-    # ---- Optional feature flags ----
-    # These control which calculation blocks are included in the model graph.
-    # Claude extracts them from structural phrases in the user's project description.
-    "has_revenue_subsidy": {
-        "type": "scalar", "unit": "flag (0.0 or 1.0)",
-        "default": 0.0,
-        "aliases": [
-            "viability_gap_funding", "vgf", "generation_subsidy", "rec_income",
-            "renewable_energy_certificate", "state_subsidy", "subsidy_income",
-            "has_vgf", "has_subsidy", "has_rec",
-        ],
-        "constraints": {"min": 0.0, "max": 1.0},
-        "description": (
-            "Set to 1.0 if the project receives a generation-linked revenue subsidy "
-            "(VGF, REC, state incentive, etc.).  When 1.0, the revenue_subsidy_block "
-            "is included and subsidy_per_kwh / subsidy_escalation must be provided."
-        ),
-    },
-    "subsidy_per_kwh": {
-        "type": "scalar", "unit": "INR_per_kWh",
-        "default": 0.0,
-        "aliases": [
-            "vgf_per_kwh", "subsidy_rate", "generation_subsidy_rate",
-            "rec_price", "rec_per_kwh", "incentive_per_kwh",
-        ],
-        "constraints": {"min": 0.0, "max": 5.0},
-        "description": "Per-unit generation subsidy in INR/kWh (e.g. 0.50 for ₹0.50/kWh VGF).",
-    },
-    "subsidy_escalation": {
-        "type": "scalar", "unit": "per_year (decimal)",
-        "default": 0.0,
-        "aliases": ["vgf_escalation", "subsidy_growth_rate"],
-        "constraints": {"min": 0.0, "max": 0.10},
-        "description": "Annual escalation rate for the subsidy payment (0.0 = fixed nominal).",
-    },
-}
-
-_REQUIRED_ASSUMPTIONS = [k for k, v in _CANONICAL.items() if v["default"] is None]
-
-# Keys that were previously required (default=None) but now carry Indian IPP benchmark defaults.
-# When _apply_defaults() fills one of these, it is logged at INFO level so callers can see it.
+# Keys that carry Indian IPP benchmark defaults instead of requiring explicit values.
+# When _apply_defaults() fills one of these, it is logged at INFO level.
 _BENCHMARK_KEYS: frozenset = frozenset({
     "capacity_mw", "tariff", "capex_per_mw", "interest_rate"
 })
 
-# ---------------------------------------------------------------------------
-# Wind IPP canonical assumption schema
-# ---------------------------------------------------------------------------
-# Replaces cuf + degradation_rate with capacity_factor + availability_factor.
-# All financial assumptions (debt, opex, tax, etc.) are shared with solar.
-
-_WIND_CANONICAL: Dict[str, Dict[str, Any]] = {
-    # ---- Generation (wind-specific) ----
-    "capacity_mw": _CANONICAL["capacity_mw"],
-    "capacity_factor": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.30,
-        "aliases": ["cf", "wind_cf", "wind_capacity_factor", "annual_yield",
-                    "plant_load_factor", "plf", "cuf"],
-        "constraints": {"min": 0.15, "max": 0.55},
-        "sensitivity": {"vary": True, "range_pct": 0.10, "distribution": "triangular"},
-        "description": "P50 annual capacity factor as a decimal (e.g. 0.30 for 30%)",
-    },
-    "availability_factor": {
-        "type": "scalar", "unit": "ratio (decimal)",
-        "default": 0.95,
-        "aliases": ["turbine_availability", "machine_availability", "availability",
-                    "pa", "plant_availability"],
-        "constraints": {"min": 0.80, "max": 0.99},
-        "description": "Annual turbine availability factor as a decimal (e.g. 0.95 for 95%)",
-    },
-    "auxiliary_consumption": _CANONICAL["auxiliary_consumption"],
-    # ---- Revenue ----
-    "tariff":             _CANONICAL["tariff"],
-    "tariff_escalation":  _CANONICAL["tariff_escalation"],
-    "ppa_tenor_years":    _CANONICAL["ppa_tenor_years"],
-    # ---- Capex (wind defaults differ) ----
-    "capex_per_mw": {
-        **_CANONICAL["capex_per_mw"],
-        "default": 700.0,
-        "constraints": {"min": 300.0, "max": 1500.0},
-        "description": "Total project capex per MW in INR Lakhs/MW (wind: typically 600–900 Lakh/MW)",
-    },
-    "capex_schedule": _CANONICAL["capex_schedule"],
-    # ---- O&M (wind defaults differ) ----
-    "opex_per_mw_pa": {
-        **_CANONICAL["opex_per_mw_pa"],
-        "default": 20.0,
-        "description": "Annual O&M cost per MW in INR Lakhs (wind: typically 15–30 Lakh/MW/yr)",
-    },
-    "opex_escalation":          _CANONICAL["opex_escalation"],
-    # ---- Debt ----
-    "debt_pct":                 _CANONICAL["debt_pct"],
-    "interest_rate":            _CANONICAL["interest_rate"],
-    "debt_tenor_years":         _CANONICAL["debt_tenor_years"],
-    "moratorium_periods":       _CANONICAL["moratorium_periods"],
-    "dscr_target":              _CANONICAL["dscr_target"],
-    "debt_sizing_mode":         _CANONICAL["debt_sizing_mode"],
-    "dsra_months":              _CANONICAL["dsra_months"],
-    "cash_sweep_rate":          _CANONICAL["cash_sweep_rate"],
-    # ---- Tax & Depreciation ----
-    "tax_rate":                 _CANONICAL["tax_rate"],
-    "depreciation_rate":        _CANONICAL["depreciation_rate"],
-    # ---- O&M sub-components ----
-    "insurance_percent_of_capex": _CANONICAL["insurance_percent_of_capex"],
-    "land_lease_lakhs_pa":        _CANONICAL["land_lease_lakhs_pa"],
-    "maintenance_capex_pct":      _CANONICAL["maintenance_capex_pct"],
-    # ---- Depreciation method ----
-    "depreciation_method":      _CANONICAL["depreciation_method"],
-    "wdv_rate":                 _CANONICAL["wdv_rate"],
-    # use_wdv is intentionally excluded: it is a numeric flag derived from
-    # depreciation_method in _derive_cross_assumptions and must not be set
-    # directly by the LLM or the user.
-    # ---- Equity ----
-    "equity_irr_target":        _CANONICAL["equity_irr_target"],
-    # ---- Optional feature flags ----
-    "has_revenue_subsidy":      _CANONICAL["has_revenue_subsidy"],
-    "subsidy_per_kwh":          _CANONICAL["subsidy_per_kwh"],
-    "subsidy_escalation":       _CANONICAL["subsidy_escalation"],
-}
-
-_WIND_REQUIRED_ASSUMPTIONS = [k for k, v in _WIND_CANONICAL.items() if v["default"] is None]
-
-# Map asset_type → (canonical dict, required list)
-_SCHEMA_BY_ASSET: Dict[str, tuple] = {
-    "solar": (_CANONICAL, _REQUIRED_ASSUMPTIONS),
-    "wind":  (_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS),
-}
-
 
 def _canonical_from_yaml(
     asset_type: str,
-    metadata_overlay: Dict[str, Dict[str, Any]],
 ) -> Tuple[Dict[str, Dict[str, Any]], List[str]]:
     """
-    Rebuild the ingestion schema from the shared YAML assumption schema.
+    Build the ingestion schema entirely from the YAML assumption schema.
 
-    YAML is the source of truth for assumption names, types, units, defaults,
-    and constraints. The existing Python metadata remains as an overlay for
-    LLM extraction niceties like aliases and richer descriptions.
+    The YAML files (dsl/assumption_schemas/<asset>.yaml) are the single source
+    of truth for all assumption metadata: names, types, units, defaults,
+    constraints, aliases, descriptions, sensitivity config, and enum values.
+
+    Entries with default_rule or ingestion_exclude are skipped — they are
+    assembly-only or derived and must not be presented to Claude.
+
+    User-added blocks may introduce new assumptions via assumption_extensions
+    sections in their block YAML files; load_assumption_schema_entries merges
+    these in automatically.
     """
     canonical: Dict[str, Dict[str, Any]] = {}
     required: List[str] = []
@@ -485,23 +84,18 @@ def _canonical_from_yaml(
             continue
 
         name = entry["name"]
-        overlay = metadata_overlay.get(name, {})
         meta: Dict[str, Any] = {
             "type": entry["type"],
-            "unit": entry.get("unit", overlay.get("unit", "")),
+            "unit": entry.get("unit", ""),
             "default": copy.deepcopy(entry.get("value")),
-            "aliases": copy.deepcopy(overlay.get("aliases", [])),
-            "constraints": copy.deepcopy(entry.get("constraints", overlay.get("constraints", {}))),
-            "description": overlay.get("description", name),
+            "aliases": copy.deepcopy(entry.get("aliases", [])),
+            "constraints": copy.deepcopy(entry.get("constraints", {})),
+            "description": entry.get("description", name),
         }
         if "sensitivity" in entry:
             meta["sensitivity"] = copy.deepcopy(entry["sensitivity"])
-        elif "sensitivity" in overlay:
-            meta["sensitivity"] = copy.deepcopy(overlay["sensitivity"])
         if "enum_values" in entry:
             meta["enum_values"] = copy.deepcopy(entry["enum_values"])
-        elif "enum_values" in overlay:
-            meta["enum_values"] = copy.deepcopy(overlay["enum_values"])
 
         canonical[name] = meta
         if meta["default"] is None:
@@ -510,13 +104,10 @@ def _canonical_from_yaml(
     return canonical, required
 
 
-_LEGACY_SOLAR_CANONICAL = _CANONICAL
-_LEGACY_WIND_CANONICAL = _WIND_CANONICAL
+_CANONICAL, _REQUIRED_ASSUMPTIONS = _canonical_from_yaml("solar")
+_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS = _canonical_from_yaml("wind")
 
-_CANONICAL, _REQUIRED_ASSUMPTIONS = _canonical_from_yaml("solar", _LEGACY_SOLAR_CANONICAL)
-_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS = _canonical_from_yaml("wind", _LEGACY_WIND_CANONICAL)
-
-_SCHEMA_BY_ASSET = {
+_SCHEMA_BY_ASSET: Dict[str, tuple] = {
     "solar": (_CANONICAL, _REQUIRED_ASSUMPTIONS),
     "wind":  (_WIND_CANONICAL, _WIND_REQUIRED_ASSUMPTIONS),
 }
