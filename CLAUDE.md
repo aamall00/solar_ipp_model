@@ -1,8 +1,8 @@
 # solar_ipp_model
 
-A DSL-driven renewable project finance engine for Indian Independent Power Producers (IPPs). Transforms project descriptions or YAML templates into fully executable financial models for solar and wind power plants.
+A DSL-driven renewable project finance engine. Transforms project descriptions or YAML templates into fully executable financial models for solar and wind power plants.
 
-**Core principle**: All arithmetic is deterministic and auditable in Python/NumPy. LLMs are used ONLY for structured extraction and model assembly — never for calculations.
+**Core principle**: All arithmetic is deterministic and auditable in Python/NumPy. LLMs are used ONLY for structured extraction and model assembly — never for calculations. No module specific behavior to be hardcoded in the business layer. The objective is that a user can simply add yaml files to bring in additional blocks in computation eg capex subsidy, equity bridge loan without having to modify code
 
 ## Architecture Overview
 

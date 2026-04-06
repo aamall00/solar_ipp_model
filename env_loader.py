@@ -89,4 +89,16 @@ def load_local_env() -> Path | None:
             os.environ.setdefault("CLAUDE_MODEL", parsed["CLAUDE_MODEL"])
         return path
 
+    # Fallback: try Streamlit secrets (Streamlit Cloud deployments)
+    try:
+        import streamlit as st
+        api_key = st.secrets.get("ANTHROPIC_API_KEY")
+        if api_key:
+            os.environ["ANTHROPIC_API_KEY"] = api_key
+            claude_model = st.secrets.get("CLAUDE_MODEL")
+            if claude_model:
+                os.environ.setdefault("CLAUDE_MODEL", claude_model)
+    except Exception:
+        pass
+
     return None
