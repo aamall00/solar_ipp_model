@@ -1278,7 +1278,7 @@ st.markdown("""
 st.markdown(
     """
     <div class="hero-panel">
-        <div class="hero-title">Project Finance Workbench</div>
+        <div class="hero-title">Asset Valuation Workbench</div>
         <div class="chip-row">
             <span class="chip">Solar and wind assets</span>
             <span class="chip">Compiled model execution</span>
