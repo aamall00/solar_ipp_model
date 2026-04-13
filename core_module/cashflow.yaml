@@ -135,6 +135,8 @@ outputs:
   # FCFE
   - name: equity_cashflow
     unit: INR_Lakhs
+  - name: cumulative_equity
+    unit: INR_Lakhs
 
 body:
   # ── SECTION 1: Cash Flow from Operations (CFO) ──────────────────────────────
@@ -199,6 +201,11 @@ body:
   - target: equity_cashflow
     expr: "equity_invested + (free_cashflow - cash_sweep) * is_operational + net_dsra_cashflow"
 
+  # Cumulative equity cashflow (J-curve): running sum from construction start to project end.
+  #   Negative during construction (investment), recovers through operations.
+  - target: cumulative_equity
+    expr: "cumsum(equity_cashflow)"
+
 wiring:
   output_reports:
     cash_flow_statement:
@@ -212,9 +219,11 @@ wiring:
       - cashflow_block.free_cashflow
       - cashflow_block.net_dsra_cashflow
       - cashflow_block.equity_cashflow
+      - cashflow_block.cumulative_equity
     returns_summary:
       - cashflow_block.equity_invested
       - cashflow_block.net_debt_cashflow
       - cashflow_block.net_dsra_cashflow
       - cashflow_block.equity_cashflow
+      - cashflow_block.cumulative_equity
       - cashflow_block.project_cashflow

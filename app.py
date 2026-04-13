@@ -127,6 +127,13 @@ def _build_model_context(ar) -> Dict[str, Any]:
             # Full project life (construction + operations)
             "equity_cashflow":  _full("cashflow_block.equity_cashflow"),
             "debt_drawdown":    _full("debt_drawdown_block.drawdown"),
+            # Cumulative equity — used for breakeven / J-curve analysis
+            "cumulative_equity": [
+                round(float(x), 1)
+                for x in np.cumsum(
+                    vars_.get("cashflow_block.equity_cashflow", np.zeros(skel.total_periods))
+                )
+            ],
         },
     }
 
