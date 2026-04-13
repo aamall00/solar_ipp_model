@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List
 
+import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -63,13 +64,15 @@ def _build_model_context(ar) -> Dict[str, Any]:
             return []
         return [round(float(x), 1) for x in arr]
 
-    # DSCR — avoid division by zero
+    # DSCR — mask by is_debt_outstanding phase flag (guards floating-point residuals
+    # that leave a near-zero but non-zero total_debt_service after debt is repaid)
     cfads_arr = vars_.get("cashflow_block.cfads", np.zeros(skel.total_periods))
     ds_arr    = vars_.get("debt_service_block.total_debt_service", np.zeros(skel.total_periods))
     ops_cfads = cfads_arr[cod:]
     ops_ds    = ds_arr[cod:]
+    debt_out  = np.asarray(skel.phases.is_debt_outstanding, dtype=bool)[cod:]
     with np.errstate(divide="ignore", invalid="ignore"):
-        dscr_arr = np.where(ops_ds > 0, ops_cfads / ops_ds, None)
+        dscr_arr = np.where(debt_out & (ops_ds > 1e-6), ops_cfads / ops_ds, None)
     dscr_list = [round(float(x), 3) if x is not None else None for x in dscr_arr]
 
     k = ar.model_results.kpis
@@ -152,7 +155,15 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
             {"CFADS": qs["cfads"], "Debt Service": qs["debt_service"]},
             index=ops_idx,
         )
-        st.line_chart(df)
+        df_reset = df.reset_index()
+        df_reset.columns = ["Quarter", "CFADS", "Debt Service"]
+        df_melted = df_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
+        chart = alt.Chart(df_melted).mark_line().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
+            color=alt.Color("Metric:N", title="Metric")
+        ).properties(width="container")
+        st.altair_chart(chart, use_container_width=True)
 
     with col2:
         _render_chart_heading(
@@ -161,7 +172,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         )
         dscr = [x if x is not None else float("nan") for x in qs["dscr"]]
         df2 = pd.DataFrame({"DSCR": dscr}, index=ops_idx)
-        st.line_chart(df2)
+        df2_reset = df2.reset_index()
+        df2_reset.columns = ["Quarter", "DSCR"]
+        chart2 = alt.Chart(df2_reset).mark_line().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("DSCR:Q", title="DSCR Ratio")
+        ).properties(width="container")
+        st.altair_chart(chart2, use_container_width=True)
         k = ar.model_results.kpis
         if k.min_dscr and k.avg_dscr:
             st.caption(f"Min {k.min_dscr:.3f}x  |  Avg {k.avg_dscr:.3f}x")
@@ -177,7 +194,15 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
             {"Revenue": qs["revenue"], "OPEX": qs["total_opex"], "EBITDA": qs["ebitda"]},
             index=ops_idx,
         )
-        st.line_chart(df3)
+        df3_reset = df3.reset_index()
+        df3_reset.columns = ["Quarter", "Revenue", "OPEX", "EBITDA"]
+        df3_melted = df3_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
+        chart3 = alt.Chart(df3_melted).mark_line().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
+            color=alt.Color("Metric:N", title="Metric")
+        ).properties(width="container")
+        st.altair_chart(chart3, use_container_width=True)
 
     with col4:
         _render_chart_heading(
@@ -185,7 +210,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
             "How quickly the debt stack amortizes over time.",
         )
         df4 = pd.DataFrame({"Debt Balance": qs["debt_balance"]}, index=ops_idx)
-        st.area_chart(df4)
+        df4_reset = df4.reset_index()
+        df4_reset.columns = ["Quarter", "Debt Balance"]
+        chart4 = alt.Chart(df4_reset).mark_area().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("Debt Balance:Q", title="Debt Balance (₹ Lakhs)")
+        ).properties(width="container")
+        st.altair_chart(chart4, use_container_width=True)
 
     # Row 3 — Principal + Interest | DSRA
     col5, col6 = st.columns(2, gap="large")
@@ -198,7 +229,15 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
             {"Principal": qs["principal"], "Interest": qs["interest"]},
             index=ops_idx,
         )
-        st.bar_chart(df5, stack=True)
+        df5_reset = df5.reset_index()
+        df5_reset.columns = ["Quarter", "Principal", "Interest"]
+        df5_melted = df5_reset.melt(id_vars=["Quarter"], var_name="Component", value_name="Value")
+        chart5 = alt.Chart(df5_melted).mark_bar().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)", stack="zero"),
+            color=alt.Color("Component:N", title="Component")
+        ).properties(width="container")
+        st.altair_chart(chart5, use_container_width=True)
 
     with col6:
         dsra = qs["dsra_balance"]
@@ -208,7 +247,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
                 "Reserve build-up and release across debt periods.",
             )
             df6 = pd.DataFrame({"DSRA": dsra}, index=ops_idx)
-            st.area_chart(df6)
+            df6_reset = df6.reset_index()
+            df6_reset.columns = ["Quarter", "DSRA"]
+            chart6 = alt.Chart(df6_reset).mark_area().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("DSRA:Q", title="DSRA Balance (₹ Lakhs)")
+            ).properties(width="container")
+            st.altair_chart(chart6, use_container_width=True)
         else:
             _render_chart_heading(
                 "DSRA Balance",
@@ -225,7 +270,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         )
         cumulative_eq = list(np.cumsum(eq_cf))
         df7 = pd.DataFrame({"Cumulative Equity CF": cumulative_eq}, index=full_idx)
-        st.line_chart(df7)
+        df7_reset = df7.reset_index()
+        df7_reset.columns = ["Quarter", "Cumulative Equity CF"]
+        chart7 = alt.Chart(df7_reset).mark_line().encode(
+            x=alt.X("Quarter:Q", title="Quarter"),
+            y=alt.Y("Cumulative Equity CF:Q", title="Cumulative Cash Flow (₹ Lakhs)")
+        ).properties(width="container")
+        st.altair_chart(chart7, use_container_width=True)
 
 
 # ---------------------------------------------------------------------------
@@ -279,15 +330,42 @@ def _render_ai_charts(ctx: Dict[str, Any], ai_specs: dict) -> None:
 
                 index = full_idx[:target_len] if target_len == n_full else ops_idx[:target_len]
                 df = pd.DataFrame(normalized, index=index)
+                
+                # Reset index for Altair
+                df_reset = df.reset_index()
+                df_reset.columns = ["Quarter"] + list(df.columns)
+                
+                # Determine axis labels based on series names
+                y_label = "Value (₹ Lakhs)"
+                if any(kw in " ".join(keys).lower() for kw in ["dscr", "ratio"]):
+                    y_label = "Ratio"
+                elif any(kw in " ".join(keys).lower() for kw in ["debt", "dsra", "cashflow", "cfads"]):
+                    y_label = "Amount (₹ Lakhs)"
+                
+                # Render with Altair and axis labels
+                df_melted = df_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
                 ctype = spec.get("chart_type", "line")
-                if ctype == "stacked_bar":
-                    st.bar_chart(df, stack=True)
-                elif ctype == "bar":
-                    st.bar_chart(df)
+                
+                if ctype in ["stacked_bar", "bar"]:
+                    chart = alt.Chart(df_melted).mark_bar().encode(
+                        x=alt.X("Quarter:Q", title="Quarter"),
+                        y=alt.Y("Value:Q", title=y_label, stack="zero" if ctype == "stacked_bar" else None),
+                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                    ).properties(width="container")
                 elif ctype == "area":
-                    st.area_chart(df)
-                else:
-                    st.line_chart(df)
+                    chart = alt.Chart(df_melted).mark_area().encode(
+                        x=alt.X("Quarter:Q", title="Quarter"),
+                        y=alt.Y("Value:Q", title=y_label),
+                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                    ).properties(width="container")
+                else:  # line
+                    chart = alt.Chart(df_melted).mark_line().encode(
+                        x=alt.X("Quarter:Q", title="Quarter"),
+                        y=alt.Y("Value:Q", title=y_label),
+                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                    ).properties(width="container")
+                
+                st.altair_chart(chart, use_container_width=True)
 
 
 def _asset_ui_key(ar, idx: int) -> str:
@@ -1280,7 +1358,7 @@ st.markdown(
     <div class="hero-panel">
         <div class="hero-title">Asset Valuation Workbench</div>
         <div class="chip-row">
-            <span class="chip">Solar and wind assets</span>
+            <span class="chip">Multiple assets</span>
             <span class="chip">Compiled model execution</span>
             <span class="chip">Debt and reserve logic</span>
             <span class="chip">Excel-ready outputs</span>
@@ -1296,7 +1374,7 @@ st.markdown(
 EXAMPLES = [
     "I want to create a project finance model for two assets - one wind and one solar. "
     "The solar model will not have any DSRA requirements and will have revenue support of 1 rs/kwh.",
-    "Two assets: 100 MW solar SPV-A at Rs. 2.65/kWh with 70% debt, and 50 MW wind SPV-B at Rs. 3.20/kWh with 75% debt.",
+    "Two assets: 100 MW solar SPV-A at Rs. 4/kWh with 70% debt, and 50 MW wind SPV-B at Rs. 5/kWh with 75% debt.",
     "Single 150 MW solar asset, 25-year PPA at Rs. 2.80/kWh, 72% debt, 12-month DSRA.",
 ]
 
@@ -1330,8 +1408,8 @@ with center_band:
             height=190,
             placeholder=(
                 "Example:\n"
-                "Two assets: 100 MW solar in SPV-A at Rs. 2.65/kWh with 70% debt,\n"
-                "and 50 MW wind in SPV-B at Rs. 3.20/kWh with 75% debt and 6-month DSRA."
+                "Two assets: 100 MW solar in SPV-A at Rs. 4/kWh with 70% debt,\n"
+                "and 50 MW wind in SPV-B at Rs. 5/kWh with 75% debt and 6-month DSRA."
             ),
             label_visibility="collapsed",
         )
