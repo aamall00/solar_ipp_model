@@ -12,7 +12,7 @@ import io
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import altair as alt
 import numpy as np
@@ -40,6 +40,22 @@ from engine.excel_exporter import export_portfolio_to_excel
 # ---------------------------------------------------------------------------
 # Model context builder
 # ---------------------------------------------------------------------------
+
+def _compute_equity_breakeven(eq_cf_arr: np.ndarray, cod: int, ppy: int) -> Optional[Dict]:
+    """Return pre-computed equity break-even facts so Claude never derives them."""
+    cum = np.cumsum(eq_cf_arr)
+    be_indices = np.where(cum > 0)[0]
+    if len(be_indices) == 0:
+        return None
+    be_period = int(be_indices[0])          # absolute period index (0-based, from FC)
+    be_q_from_cod = be_period - cod         # quarters since COD
+    return {
+        "period_absolute":          be_period,
+        "quarter_from_cod":         be_q_from_cod,
+        "year_from_cod":            round(be_q_from_cod / ppy, 1),
+        "year_from_financial_close": round(be_period / ppy, 1),
+    }
+
 
 def _build_model_context(ar) -> Dict[str, Any]:
     """
@@ -135,6 +151,10 @@ def _build_model_context(ar) -> Dict[str, Any]:
                 )
             ],
         },
+        "equity_breakeven": _compute_equity_breakeven(
+            vars_.get("cashflow_block.equity_cashflow", np.zeros(skel.total_periods)),
+            cod, ppy,
+        ),
     }
 
 
@@ -142,8 +162,52 @@ def _build_model_context(ar) -> Dict[str, Any]:
 # Standard chart renderer
 # ---------------------------------------------------------------------------
 
+def _dark_theme_config():
+    """Apply dark theme configuration to Altair globally."""
+    # Configure Altair with dark theme options
+    alt.themes.register(
+        'dark_theme',
+        lambda: {
+            'config': {
+                'background': 'rgba(30,30,30,0.75)',
+                'title': {'color': '#f5f3ee'},
+                'axis': {
+                    'labelColor': '#b4b0a8',
+                    'titleColor': '#b4b0a8',
+                    'gridColor': 'rgba(255,255,255,0.10)',
+                    'domainColor': 'rgba(255,255,255,0.10)'
+                },
+                'legend': {
+                    'labelColor': '#b4b0a8',
+                    'titleColor': '#b4b0a8'
+                },
+                'view': {
+                    'stroke': 'transparent'
+                }
+            }
+        }
+    )
+    alt.themes.enable('dark_theme')
+
 def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
     """Render the 7 hardcoded standard financial charts for an asset."""
+    # Initialize and apply dark theme
+    _dark_theme_config()
+    
+    # Chart background configuration (redundant with theme but ensures consistency)
+    dark_bg = lambda chart: chart.configure(
+        background='rgba(30,30,30,0.75)',
+        view={'stroke': 'transparent'}
+    ).configure_axis(
+        labelColor='#b4b0a8',
+        titleColor='#b4b0a8',
+        gridColor='rgba(255,255,255,0.10)',
+        domainColor='rgba(255,255,255,0.10)'
+    ).configure_legend(
+        labelColor='#b4b0a8',
+        titleColor='#b4b0a8'
+    )
+    
     qs   = ctx["quarterly_series"]
     skel = ar.model_def.project_skeleton
     n_ops  = len(qs["cfads"])
@@ -165,11 +229,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df_reset = df.reset_index()
         df_reset.columns = ["Quarter", "CFADS", "Debt Service"]
         df_melted = df_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
-        chart = alt.Chart(df_melted).mark_line().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
-            color=alt.Color("Metric:N", title="Metric")
-        ).properties(width="container")
+        chart = dark_bg(
+            alt.Chart(df_melted).mark_line().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
+                color=alt.Color("Metric:N", title="Metric")
+            ).properties(width="container")
+        )
         st.altair_chart(chart, use_container_width=True)
 
     with col2:
@@ -181,10 +247,12 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df2 = pd.DataFrame({"DSCR": dscr}, index=ops_idx)
         df2_reset = df2.reset_index()
         df2_reset.columns = ["Quarter", "DSCR"]
-        chart2 = alt.Chart(df2_reset).mark_line().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("DSCR:Q", title="DSCR Ratio")
-        ).properties(width="container")
+        chart2 = dark_bg(
+            alt.Chart(df2_reset).mark_line().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("DSCR:Q", title="DSCR Ratio")
+            ).properties(width="container")
+        )
         st.altair_chart(chart2, use_container_width=True)
         k = ar.model_results.kpis
         if k.min_dscr and k.avg_dscr:
@@ -204,11 +272,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df3_reset = df3.reset_index()
         df3_reset.columns = ["Quarter", "Revenue", "OPEX", "EBITDA"]
         df3_melted = df3_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
-        chart3 = alt.Chart(df3_melted).mark_line().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
-            color=alt.Color("Metric:N", title="Metric")
-        ).properties(width="container")
+        chart3 = dark_bg(
+            alt.Chart(df3_melted).mark_line().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("Value:Q", title="Amount (₹ Lakhs)"),
+                color=alt.Color("Metric:N", title="Metric")
+            ).properties(width="container")
+        )
         st.altair_chart(chart3, use_container_width=True)
 
     with col4:
@@ -219,10 +289,12 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df4 = pd.DataFrame({"Debt Balance": qs["debt_balance"]}, index=ops_idx)
         df4_reset = df4.reset_index()
         df4_reset.columns = ["Quarter", "Debt Balance"]
-        chart4 = alt.Chart(df4_reset).mark_area().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("Debt Balance:Q", title="Debt Balance (₹ Lakhs)")
-        ).properties(width="container")
+        chart4 = dark_bg(
+            alt.Chart(df4_reset).mark_area().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("Debt Balance:Q", title="Debt Balance (₹ Lakhs)")
+            ).properties(width="container")
+        )
         st.altair_chart(chart4, use_container_width=True)
 
     # Row 3 — Principal + Interest | DSRA
@@ -239,11 +311,13 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df5_reset = df5.reset_index()
         df5_reset.columns = ["Quarter", "Principal", "Interest"]
         df5_melted = df5_reset.melt(id_vars=["Quarter"], var_name="Component", value_name="Value")
-        chart5 = alt.Chart(df5_melted).mark_bar().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("Value:Q", title="Amount (₹ Lakhs)", stack="zero"),
-            color=alt.Color("Component:N", title="Component")
-        ).properties(width="container")
+        chart5 = dark_bg(
+            alt.Chart(df5_melted).mark_bar().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("Value:Q", title="Amount (₹ Lakhs)", stack="zero"),
+                color=alt.Color("Component:N", title="Component")
+            ).properties(width="container")
+        )
         st.altair_chart(chart5, use_container_width=True)
 
     with col6:
@@ -256,10 +330,12 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
             df6 = pd.DataFrame({"DSRA": dsra}, index=ops_idx)
             df6_reset = df6.reset_index()
             df6_reset.columns = ["Quarter", "DSRA"]
-            chart6 = alt.Chart(df6_reset).mark_area().encode(
-                x=alt.X("Quarter:Q", title="Quarter"),
-                y=alt.Y("DSRA:Q", title="DSRA Balance (₹ Lakhs)")
-            ).properties(width="container")
+            chart6 = dark_bg(
+                alt.Chart(df6_reset).mark_area().encode(
+                    x=alt.X("Quarter:Q", title="Quarter"),
+                    y=alt.Y("DSRA:Q", title="DSRA Balance (₹ Lakhs)")
+                ).properties(width="container")
+            )
             st.altair_chart(chart6, use_container_width=True)
         else:
             _render_chart_heading(
@@ -279,10 +355,12 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
         df7 = pd.DataFrame({"Cumulative Equity CF": cumulative_eq}, index=full_idx)
         df7_reset = df7.reset_index()
         df7_reset.columns = ["Quarter", "Cumulative Equity CF"]
-        chart7 = alt.Chart(df7_reset).mark_line().encode(
-            x=alt.X("Quarter:Q", title="Quarter"),
-            y=alt.Y("Cumulative Equity CF:Q", title="Cumulative Cash Flow (₹ Lakhs)")
-        ).properties(width="container")
+        chart7 = dark_bg(
+            alt.Chart(df7_reset).mark_line().encode(
+                x=alt.X("Quarter:Q", title="Quarter"),
+                y=alt.Y("Cumulative Equity CF:Q", title="Cumulative Cash Flow (₹ Lakhs)")
+            ).properties(width="container")
+        )
         st.altair_chart(chart7, use_container_width=True)
 
 
@@ -292,6 +370,9 @@ def _render_standard_charts(ar, ctx: Dict[str, Any]) -> None:
 
 def _render_ai_charts(ctx: Dict[str, Any], ai_specs: dict) -> None:
     """Render the AI-proposed additional charts in pairs."""
+    # Initialize dark theme if not already done
+    _dark_theme_config()
+    
     charts  = ai_specs.get("charts", [])
     series  = ctx["quarterly_series"]
     n_ops   = len(series["cfads"])
@@ -352,26 +433,46 @@ def _render_ai_charts(ctx: Dict[str, Any], ai_specs: dict) -> None:
                 # Render with Altair and axis labels
                 df_melted = df_reset.melt(id_vars=["Quarter"], var_name="Metric", value_name="Value")
                 ctype = spec.get("chart_type", "line")
-                
+
+                # Helper to apply dark theme
+                dark_bg = lambda chart: chart.configure(
+                    background='rgba(30,30,30,0.75)',
+                    view={'stroke': 'transparent'}
+                ).configure_axis(
+                    labelColor='#b4b0a8',
+                    titleColor='#b4b0a8',
+                    gridColor='rgba(255,255,255,0.10)',
+                    domainColor='rgba(255,255,255,0.10)'
+                ).configure_legend(
+                    labelColor='#b4b0a8',
+                    titleColor='#b4b0a8'
+                )
+
                 if ctype in ["stacked_bar", "bar"]:
-                    chart = alt.Chart(df_melted).mark_bar().encode(
-                        x=alt.X("Quarter:Q", title="Quarter"),
-                        y=alt.Y("Value:Q", title=y_label, stack="zero" if ctype == "stacked_bar" else None),
-                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
-                    ).properties(width="container")
+                    chart = dark_bg(
+                        alt.Chart(df_melted).mark_bar().encode(
+                            x=alt.X("Quarter:Q", title="Quarter"),
+                            y=alt.Y("Value:Q", title=y_label, stack="zero" if ctype == "stacked_bar" else None),
+                            color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                        ).properties(width="container")
+                    )
                 elif ctype == "area":
-                    chart = alt.Chart(df_melted).mark_area().encode(
-                        x=alt.X("Quarter:Q", title="Quarter"),
-                        y=alt.Y("Value:Q", title=y_label),
-                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
-                    ).properties(width="container")
+                    chart = dark_bg(
+                        alt.Chart(df_melted).mark_area().encode(
+                            x=alt.X("Quarter:Q", title="Quarter"),
+                            y=alt.Y("Value:Q", title=y_label),
+                            color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                        ).properties(width="container")
+                    )
                 else:  # line
-                    chart = alt.Chart(df_melted).mark_line().encode(
-                        x=alt.X("Quarter:Q", title="Quarter"),
-                        y=alt.Y("Value:Q", title=y_label),
-                        color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
-                    ).properties(width="container")
-                
+                    chart = dark_bg(
+                        alt.Chart(df_melted).mark_line().encode(
+                            x=alt.X("Quarter:Q", title="Quarter"),
+                            y=alt.Y("Value:Q", title=y_label),
+                            color=alt.Color("Metric:N", title="Metric") if len(keys) > 1 else alt.value("#1f77b4")
+                        ).properties(width="container")
+                    )
+
                 st.altair_chart(chart, use_container_width=True)
 
 
@@ -1114,7 +1215,7 @@ st.markdown("""
         min-height: 180px;
         border-radius: 20px;
         border: 1px solid var(--line);
-        background: rgba(255,255,255,0.03);
+        background: rgba(30,30,30,0.85);
         color: var(--ink);
         font-size: 0.98rem;
         padding: 1rem 1rem 1.1rem 1rem;
@@ -1125,11 +1226,40 @@ st.markdown("""
     }
 
     div[data-testid="stMarkdownContainer"] p,
+    div[data-testid="stMarkdownContainer"] h1,
+    div[data-testid="stMarkdownContainer"] h2,
+    div[data-testid="stMarkdownContainer"] h3,
+    div[data-testid="stMarkdownContainer"] h4,
+    div[data-testid="stMarkdownContainer"] h5,
+    div[data-testid="stMarkdownContainer"] h6,
+    div[data-testid="stMarkdownContainer"] th,
+    div[data-testid="stMarkdownContainer"] td,
+    div[data-testid="stMarkdownContainer"] strong,
+    div[data-testid="stMarkdownContainer"] b,
+    div[data-testid="stMarkdownContainer"] span,
     div[data-testid="stCaptionContainer"],
     label p,
     .st-emotion-cache-10trblm,
     .st-emotion-cache-16idsys {
-        color: var(--ink);
+        color: var(--ink) !important;
+    }
+
+    div[data-testid="stMarkdownContainer"] table {
+        border-collapse: collapse;
+        width: 100%;
+        margin: 0.5rem 0;
+    }
+
+    div[data-testid="stMarkdownContainer"] th,
+    div[data-testid="stMarkdownContainer"] td {
+        padding: 0.75rem;
+        border: 1px solid var(--line);
+        text-align: left;
+    }
+
+    div[data-testid="stMarkdownContainer"] th {
+        background: rgba(255,255,255,0.05);
+        font-weight: 700;
     }
 
     div[data-testid="stButton"] > button,
@@ -1173,12 +1303,13 @@ st.markdown("""
 
     div[data-testid="stChatInput"] textarea,
     div[data-testid="stChatInput"] input {
+        background: rgba(30,30,30,0.85) !important;
         color: var(--ink);
     }
 
     div[data-testid="stStatusWidget"],
     div[data-testid="stExpander"] {
-        background: rgba(255,255,255,0.03);
+        background: rgba(30,30,30,0.75);
         border: 1px solid var(--line);
         border-radius: 18px;
     }
@@ -1194,10 +1325,14 @@ st.markdown("""
         gap: 0.8rem;
     }
 
-    div[data-testid="stInfo"] {
-        background: rgba(108, 224, 178, 0.08);
+    div[data-testid="stInfo"],
+    div[data-testid="stWarning"],
+    div[data-testid="stError"],
+    div[data-testid="stSuccess"] {
+        background: rgba(30,30,30,0.75);
         color: var(--ink);
-        border: 1px solid rgba(108, 224, 178, 0.14);
+        border: 1px solid var(--line);
+        border-radius: 14px;
     }
 
     /* Tooltip styles */

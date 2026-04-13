@@ -108,7 +108,9 @@ Rules:
 
 _CHAT_SYSTEM = """You are a senior project finance analyst. Answer questions about this IPP asset
 using the model data provided. Be concise (3–5 sentences), cite specific numbers,
-and flag any bankability concerns where relevant. Do not speculate beyond the data."""
+and flag any bankability concerns where relevant. Do not speculate beyond the data.
+All time-based metrics (break-even, payback periods) are pre-computed in the data —
+use those values directly; do not re-derive them from series arrays."""
 
 # History cap to bound token usage
 _MAX_HISTORY_TURNS = 6
